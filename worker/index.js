@@ -43,7 +43,9 @@ const SETTING_DEFAULTS = {
   theme: "light", jurisdiction: "Federal (U.S.)", systemPrompt: null, highlight: true,
 };
 
-const SESSION_DAYS = 30;
+// How long a sign-in lasts. Default is effectively permanent (ten years);
+// changing the access key still signs every browser out.
+const SESSION_DAYS = 3650;
 const MAX_TEXT = 400_000;
 const MAX_MESSAGES = 400;
 const FREE_FAILS = 5;
@@ -153,7 +155,7 @@ async function verifyToken(env, token) {
   const parts = token.split(".");
   if (parts.length !== 3) return false;
   const [exp, nonce, sig] = parts;
-  if (!/^\d{1,16}$/.test(exp) || Number(exp) < Date.now()) return false;
+  if (!/^\d{1,17}$/.test(exp) || Number(exp) < Date.now()) return false;
   return safeEqual(sig, await sign(env, `${exp}.${nonce}`));
 }
 async function isAuthed(env, request) {
