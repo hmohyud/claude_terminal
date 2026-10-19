@@ -348,25 +348,43 @@ async function officialSpend(env) {
   url.searchParams.set("ending_at", new Date(Date.now() + 86_400_000).toISOString());
   url.searchParams.set("bucket_width", "1d");
   url.searchParams.set("limit", "31");
+  const headers = { "x-api-key": env.ANTHROPIC_ADMIN_KEY, "anthropic-version": "2023-06-01", "User-Agent": "claude-terminal/2.0 (https://github.com/hmohyud/claude_terminal)" };
   let out;
   try {
-    const r = await fetch(url, {
-      headers: { "x-api-key": env.ANTHROPIC_ADMIN_KEY, "anthropic-version": "2023-06-01", "User-Agent": "claude-terminal/2.0 (https://github.com/hmohyud/claude_terminal)" },
-    });
+    // 1. Closed days in dollars from the cost report (it never includes the
+    //    current day).
+    const r = await fetch(url, { headers });
     const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      out = { at: Date.now(), error: (body.error && body.error.message) || `HTTP ${r.status}` };
-    } else {
-      // Amounts are decimal strings in cents.
-      const days = (body.data || []).map((b) => ({
-        day: String(b.starting_at || "").slice(0, 10),
-        cost: Math.round(b.results.reduce((s, x) => s + Number(x.amount || 0), 0)) / 100,
-      }));
-      const today = now.toISOString().slice(0, 10);
-      const month = today.slice(0, 7);
-      const sum = (f) => Math.round(days.filter(f).reduce((s, d) => s + d.cost, 0) * 100) / 100;
-      out = { at: Date.now(), source: "anthropic", today: sum((d) => d.day === today), month: sum((d) => d.day.startsWith(month)), last30: sum(() => true), days };
+    if (!r.ok) throw new Error((body.error && body.error.message) || `HTTP ${r.status}`);
+    const today = now.toISOString().slice(0, 10);
+    // Amounts are decimal strings in cents.
+    const days = (body.data || [])
+      .map((b) => ({ day: String(b.starting_at || "").slice(0, 10), cost: Math.round(b.results.reduce((s, x) => s + Number(x.amount || 0), 0)) / 100 }))
+      .filter((d) => d.day < today);
+    // 2. Today from the usage report, per minute up to the current minute:
+    //    Anthropic's exact token counts at list prices.
+    const u = new URL("https://api.anthropic.com/v1/organizations/usage_report/messages");
+    u.searchParams.set("starting_at", new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString());
+    u.searchParams.set("ending_at", new Date(Date.now() + 60_000).toISOString());
+    u.searchParams.set("bucket_width", "1m");
+    u.searchParams.set("limit", "1440");
+    u.searchParams.append("group_by[]", "model");
+    const ur = await fetch(u, { headers });
+    const ub = await ur.json().catch(() => ({}));
+    if (!ur.ok) throw new Error((ub.error && ub.error.message) || `HTTP ${ur.status}`);
+    let todayCost = 0;
+    for (const b of ub.data || []) {
+      for (const x of b.results || []) {
+        const m = catalogFor(x.model);
+        if (!m) continue;
+        const cc = x.cache_creation || {};
+        todayCost += ((x.uncached_input_tokens || 0) * m.in + (x.cache_read_input_tokens || 0) * m.cacheRead + (cc.ephemeral_5m_input_tokens || 0) * m.in * 1.25 + (cc.ephemeral_1h_input_tokens || 0) * m.in * 2 + (x.output_tokens || 0) * m.out) / 1e6;
+      }
     }
+    days.push({ day: today, cost: Math.round(todayCost * 10000) / 10000, live: true });
+    const month = today.slice(0, 7);
+    const sum = (f) => Math.round(days.filter(f).reduce((s, d) => s + d.cost, 0) * 10000) / 10000;
+    out = { at: Date.now(), source: "anthropic", today: sum((d) => d.day === today), month: sum((d) => d.day.startsWith(month)), last30: sum(() => true), days };
   } catch (e) {
     out = { at: Date.now(), error: e.message };
   }

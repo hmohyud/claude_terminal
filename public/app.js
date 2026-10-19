@@ -1256,9 +1256,9 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       body.innerHTML = "";
       const exact = u.official && !u.official.error ? u.official : null;
       if (exact) {
-        body.appendChild(el("div", "section", "From Anthropic's cost report (exact, a few minutes behind)"));
+        body.appendChild(el("div", "section", "From Anthropic (exact)"));
         const ex = el("div", "cards");
-        ex.appendChild(el("div", "card", `<div class="k">Today</div><div class="v">${fmtCost(exact.today)}</div><div class="s">billed by Anthropic</div>`));
+        ex.appendChild(el("div", "card", `<div class="k">Today</div><div class="v">${fmtCost(exact.today)}</div><div class="s">usage report, up to the minute</div>`));
         ex.appendChild(el("div", "card", `<div class="k">This month</div><div class="v">${fmtCost(exact.month)}</div><div class="s">${u.month}</div>`));
         ex.appendChild(el("div", "card", `<div class="k">Last 30 days</div><div class="v">${fmtCost(exact.last30)}</div><div class="s">updated ${fmtAgo(exact.at)}</div>`));
         body.appendChild(ex);
