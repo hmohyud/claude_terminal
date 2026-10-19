@@ -184,7 +184,11 @@ async function recordFail(env, ip, fails) {
 
 // ---------------------------------------------------------------- settings
 async function loadSettings(env) {
-  return { ...SETTING_DEFAULTS, ...((await env.KV.get("settings", "json")) || {}) };
+  const s = { ...SETTING_DEFAULTS, ...((await env.KV.get("settings", "json")) || {}) };
+  // The monthly limit behind the "remaining" readout comes from the Worker
+  // config (MONTHLY_LIMIT_USD) unless a value was saved explicitly.
+  if (s.monthlyBudget == null && Number(env.MONTHLY_LIMIT_USD) > 0) s.monthlyBudget = Number(env.MONTHLY_LIMIT_USD);
+  return s;
 }
 
 function applySettingsPatch(settings, b) {

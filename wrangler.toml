@@ -14,6 +14,8 @@ workers_dev = true
 # Comma-separated list of browser origins allowed to call the API. The deploy
 # workflow sets this to your GitHub Pages origin.
 ALLOWED_ORIGIN = ""
+# Monthly API budget in USD, shown as "remaining" in the usage panel.
+MONTHLY_LIMIT_USD = "200"
 # Storage caps. Oldest threads/files are removed first (first in, first out).
 MAX_THREADS = "200"
 MAX_FILES = "300"

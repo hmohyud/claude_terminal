@@ -47,7 +47,7 @@
       </div>
       <span class="spacer"></span>
       <label class="ctl">Jurisdiction <select id="jurisdiction"></select></label>
-      <label class="ctl" title="Simple: quicker and cheaper. Complex: the most capable model for hard questions and long documents.">Mode <select id="model"></select></label>
+      <label class="ctl" title="Opus is faster and cheaper. Fable is slower and more intricate, for hard questions and long documents.">Model <select id="model"></select></label>
       <label class="ctl" title="How hard Claude thinks before answering. More effort means better answers and slower replies.">Effort <select id="effort"></select></label>
       <span id="speed-hint" class="speed"></span>
       <label class="ctl check" title="Color-code citations, statutes, dates, deadlines, amounts, defined terms and parties"><input type="checkbox" id="highlight"> Highlights</label>
@@ -123,9 +123,8 @@
         </label>
         <div class="field-row"><button id="set-system-reset" class="small">Reset to the built-in legal instructions</button></div>
         <div class="grid2">
-          <label class="field">Default mode for new threads <select id="set-mode"></select></label>
+          <label class="field">Default model for new threads <select id="set-mode"></select></label>
           <label class="field">Default jurisdiction <select id="set-jurisdiction"></select></label>
-          <label class="field">Monthly limit (USD), for the remaining readout <input id="set-budget" type="number" min="0" step="1" placeholder="none"></label>
           <label class="field" title="Caps how long one answer can be. Attached documents and the conversation so far do not count toward it.">Longest reply (output tokens; about 0.75 words each) <input id="set-max" type="number" min="256" max="128000" step="1000"></label>
         </div>
         <label class="check"><input type="checkbox" id="set-highlight"> Color-code legal references in answers and previews</label>

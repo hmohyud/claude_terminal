@@ -32,8 +32,8 @@
 
   // Two ways to work. Anything else is reachable with /model <name>.
   const MODES = [
-    { id: "simple", model: "claude-opus-5-5", label: "Simple questions", desc: "Opus · quicker, cheaper", tier: 2 },
-    { id: "complex", model: "claude-fable-5-1", label: "Complex questions", desc: "Fable · most capable", tier: 3 },
+    { id: "opus", model: "claude-opus-5-5", label: "Opus (faster, cheaper)", tier: 2 },
+    { id: "fable", model: "claude-fable-5-1", label: "Fable (slower, intricate)", tier: 3 },
   ];
   const EFFORT_LABELS = { low: "Quick · fast", medium: "Balanced", high: "Thorough · slower", xhigh: "Deep · slow", max: "Maximum · very slow" };
   const EFFORT_RANK = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
@@ -434,11 +434,11 @@
     const model = t ? t.model : state.settings.model || state.defaultModel;
     const opts = MODES.map((m) => {
       const info = modelInfo(m.model);
-      const o = new Option(`${m.label} · ${m.desc}`, m.model);
+      const o = new Option(m.label, m.model);
       o.title = info && info.in != null ? `${info.display}: $${info.in} per million input tokens, $${info.out} per million output tokens` : m.model;
       return o;
     });
-    if (model && !modeFor(model)) opts.push(new Option(`Custom · ${model}`, model));
+    if (model && !modeFor(model)) opts.push(new Option(`Custom (${model})`, model));
     fillSelect($("#model"), opts, model);
     fillSelect($("#jurisdiction"), [new Option("none", ""), ...JURISDICTIONS.map((j) => new Option(j, j))], t ? t.jurisdiction || "" : state.settings.jurisdiction || "");
     $("#highlight").checked = state.settings.highlight !== false;
@@ -1045,7 +1045,7 @@
   /title <text>         rename this thread
   /jurisdiction <name>  set the jurisdiction for this thread (e.g. /jurisdiction Texas, or none)
   /system [text|clear]  instructions for this thread only
-  /model simple|complex|<name>   switch mode or pick any model · /models lists them with prices
+  /model opus|fable|<name>   switch model · /models lists every model with prices
   /effort <level>       low (fast) · medium · high (slower) · xhigh (slow) · max (very slow) · default
   /thinking on|off      show the reasoning summary
   /highlight on|off     color-code legal references
@@ -1095,7 +1095,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         const q = arg.toLowerCase();
         const mode = MODES.find((x) => x.id === q);
         const m = mode ? { id: mode.model } : state.models.find((x) => x.id === q) || state.models.find((x) => x.id.includes(q) || x.name.toLowerCase().includes(q));
-        if (!m) return note(`No model matches "${arg}". Try simple, complex, or a name from /models.`);
+        if (!m) return note(`No model matches "${arg}". Try opus, fable, or a name from /models.`);
         setModel(m.id);
         return note(`Model → ${m.id}`);
       }
@@ -1201,9 +1201,8 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     const s = state.settings;
     $("#set-system").value = s.systemPrompt || state.legalPrompt || "";
     const curModel = s.model || state.defaultModel;
-    fillSelect($("#set-mode"), [...MODES.map((m) => new Option(`${m.label} · ${m.desc}`, m.model)), ...(modeFor(curModel) ? [] : [new Option(`Custom · ${curModel}`, curModel)])], curModel);
+    fillSelect($("#set-mode"), [...MODES.map((m) => new Option(m.label, m.model)), ...(modeFor(curModel) ? [] : [new Option(`Custom (${curModel})`, curModel)])], curModel);
     fillSelect($("#set-jurisdiction"), [new Option("none", ""), ...JURISDICTIONS.map((j) => new Option(j, j))], s.jurisdiction || "");
-    $("#set-budget").value = s.monthlyBudget == null ? "" : s.monthlyBudget;
     $("#set-max").value = s.maxTokens || 32000;
     $("#set-highlight").checked = s.highlight !== false;
     $("#set-thinking").checked = s.showThinking !== false;
@@ -1218,7 +1217,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       systemPrompt: sys && sys !== (state.legalPrompt || "").trim() ? sys : null,
       model: $("#set-mode").value || null,
       jurisdiction: $("#set-jurisdiction").value || null,
-      monthlyBudget: $("#set-budget").value === "" ? null : Number($("#set-budget").value),
       maxTokens: Number($("#set-max").value) || 32000,
       highlight: $("#set-highlight").checked,
       showThinking: $("#set-thinking").checked,
@@ -1263,7 +1261,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         const cls = pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok";
         cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v"><span class="${cls}">${fmtCost(Math.max(0, b.monthly - month))}</span></div><div class="s">of ${fmtCost(b.monthly)} · ${Math.round(pct * 100)}% used</div>`));
       } else {
-        cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v">—</div><div class="s">set a monthly limit in Settings</div>`));
+        cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v">—</div><div class="s">no monthly limit configured</div>`));
       }
       body.appendChild(cards);
       let note;
