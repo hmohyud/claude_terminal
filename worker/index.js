@@ -383,8 +383,9 @@ async function officialSpend(env) {
     }
     days.push({ day: today, cost: Math.round(todayCost * 10000) / 10000, live: true });
     const month = today.slice(0, 7);
+    const weekAgo = new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10);
     const sum = (f) => Math.round(days.filter(f).reduce((s, d) => s + d.cost, 0) * 10000) / 10000;
-    out = { at: Date.now(), source: "anthropic", today: sum((d) => d.day === today), month: sum((d) => d.day.startsWith(month)), last30: sum(() => true), days };
+    out = { at: Date.now(), source: "anthropic", today: sum((d) => d.day === today), week: sum((d) => d.day >= weekAgo), month: sum((d) => d.day.startsWith(month)), last30: sum(() => true), days };
   } catch (e) {
     out = { at: Date.now(), error: e.message };
   }

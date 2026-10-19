@@ -1253,93 +1253,31 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     body.textContent = "Loading…";
     try {
       const u = await refreshUsage();
-      body.innerHTML = "";
       const exact = u.official && !u.official.error ? u.official : null;
-      if (exact) {
-        body.appendChild(el("div", "section", "From Anthropic (exact)"));
-        const ex = el("div", "cards");
-        ex.appendChild(el("div", "card", `<div class="k">Today</div><div class="v">${fmtCost(exact.today)}</div><div class="s">usage report, up to the minute</div>`));
-        ex.appendChild(el("div", "card", `<div class="k">This month</div><div class="v">${fmtCost(exact.month)}</div><div class="s">${u.month}</div>`));
-        ex.appendChild(el("div", "card", `<div class="k">Last 30 days</div><div class="v">${fmtCost(exact.last30)}</div><div class="s">updated ${fmtAgo(exact.at)}</div>`));
-        body.appendChild(ex);
-      } else if (u.official && u.official.error) {
-        body.appendChild(el("div", "fine", `Anthropic's cost report could not be read (${esc(u.official.error)}). Showing this terminal's estimate instead.`));
-      } else {
-        body.appendChild(el("div", "fine", "These are estimates from token counts. To show Anthropic's exact billing, add an ANTHROPIC_ADMIN_KEY secret (an Admin API key from the Console) and redeploy."));
-      }
-      body.appendChild(el("div", "section", exact ? "This terminal's own count (estimate)" : "This terminal's own count"));
+      const today = exact ? exact.today : u.totals.today.cost;
+      const week = exact ? exact.week : u.totals.week.cost;
+      const month = exact ? exact.month : u.totals.month.cost;
+      const b = u.budget;
+      const now = new Date();
+      const resets = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" });
+      body.innerHTML = "";
       const cards = el("div", "cards");
-      for (const [k, label] of [["today", "Today"], ["week", "Last 7 days"], ["month", "This month"], ["all", "All time"]]) {
-        const s = u.totals[k];
-        cards.appendChild(el("div", "card", `<div class="k">${label}</div><div class="v">${fmtCost(s.cost)}</div><div class="s">${fmtNum(s.requests)} replies · ${fmtNum(s.input + s.cacheRead + s.cacheWrite)} in · ${fmtNum(s.output)} out</div>`));
+      cards.appendChild(el("div", "card", `<div class="k">Today</div><div class="v">${fmtCost(today)}</div><div class="s">&nbsp;</div>`));
+      cards.appendChild(el("div", "card", `<div class="k">This week</div><div class="v">${fmtCost(week)}</div><div class="s">last 7 days</div>`));
+      cards.appendChild(el("div", "card", `<div class="k">This month</div><div class="v">${fmtCost(month)}</div><div class="s">resets ${resets}</div>`));
+      if (b.monthly != null) {
+        const pct = b.monthly > 0 ? Math.min(1, month / b.monthly) : 1;
+        const cls = pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok";
+        cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v"><span class="${cls}">${fmtCost(Math.max(0, b.monthly - month))}</span></div><div class="s">of ${fmtCost(b.monthly)} · ${Math.round(pct * 100)}% used</div>`));
+      } else {
+        cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v">—</div><div class="s">set a monthly limit in Settings</div>`));
       }
       body.appendChild(cards);
-      body.appendChild(el("div", "section", "Monthly budget"));
-      const row = el("div", "budget-row");
-      const input = el("input");
-      input.type = "number";
-      input.min = "0";
-      input.step = "1";
-      input.placeholder = "USD";
-      input.value = u.budget.monthly == null ? "" : u.budget.monthly;
-      row.appendChild(el("span", "", "$"));
-      row.appendChild(input);
-      row.appendChild(btn("Save", async () => {
-        await saveSettings({ monthlyBudget: input.value === "" ? null : Number(input.value) });
-        openUsage();
-      }, "small"));
-      if (u.budget.monthly) {
-        const pct = Math.min(1, u.budget.spent / u.budget.monthly);
-        const bar = el("div", "bar");
-        const fill = el("div");
-        fill.style.width = (pct * 100).toFixed(1) + "%";
-        fill.className = pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "";
-        bar.appendChild(fill);
-        row.appendChild(bar);
-        row.appendChild(el("span", "", `${fmtCost(u.budget.spent)} spent · <b>${fmtCost(Math.max(0, u.budget.remaining))} remaining</b> of ${fmtCost(u.budget.monthly)} in ${u.month}${u.budget.source === "anthropic" ? " (per Anthropic)" : " (estimate)"}`));
-      } else row.appendChild(el("span", "", `No budget set. ${fmtCost(u.budget.spent)} spent in ${u.month}${u.budget.source === "anthropic" ? " per Anthropic" : " (estimate)"}.`));
-      body.appendChild(row);
-
-      body.appendChild(el("div", "section", "Rate limits (from the last reply)"));
-      const rl = state.live.rateLimit;
-      if (rl) {
-        const grid = el("div", "rl");
-        for (const [key, label] of [["requests", "Requests per minute"], ["tokens", "Tokens per minute"], ["input-tokens", "Input tokens per minute"], ["output-tokens", "Output tokens per minute"]]) {
-          const rem = rl[`${key}-remaining`];
-          const lim = rl[`${key}-limit`];
-          if (rem == null && lim == null) continue;
-          const reset = rl[`${key}-reset`];
-          const secs = reset ? Math.max(0, Math.round((new Date(reset).getTime() - Date.now()) / 1000)) : null;
-          grid.appendChild(el("div", "card", `<div class="k">${label}</div><div class="v">${fmtNum(rem)} <span class="s">of ${fmtNum(lim)} left</span></div><div class="s">${secs != null ? `resets in ${secs}s` : ""}</div>`));
-        }
-        grid.appendChild(el("div", "card", `<div class="k">Captured</div><div class="v">${fmtAgo(rl.at)}</div><div class="s">${new Date(rl.at).toLocaleTimeString()}</div>`));
-        body.appendChild(grid);
-      } else body.appendChild(el("div", "fine", "No reply yet in this session. Send a message to populate this."));
-
-      body.appendChild(el("div", "section", "Last 30 days"));
-      const spark = el("div", "spark");
-      const max = Math.max(0.000001, ...u.days.map((d) => d.cost));
-      for (const d of u.days) {
-        const b = el("div");
-        b.style.height = Math.max(2, (d.cost / max) * 100) + "%";
-        b.title = `${d.day}: ${fmtCost(d.cost)} · ${d.requests} replies`;
-        spark.appendChild(b);
-      }
-      body.appendChild(spark);
-      body.appendChild(el("div", "spark-labels", `<span>${u.days[0].day}</span><span>${u.days[u.days.length - 1].day}</span>`));
-      if (u.byModel.length) {
-        body.appendChild(el("div", "section", "By model, this month"));
-        const tb = el("table", "t", `<tr><th>Model</th><th class="num">Replies</th><th class="num">Input</th><th class="num">Cached</th><th class="num">Output</th><th class="num">Cost</th></tr>`);
-        for (const r of u.byModel) tb.insertAdjacentHTML("beforeend", `<tr><td>${esc(r.model)}</td><td class="num">${fmtNum(r.requests)}</td><td class="num">${fmtNum(r.input)}</td><td class="num">${fmtNum(r.cacheRead)}</td><td class="num">${fmtNum(r.output)}</td><td class="num">${fmtCost(r.cost)}</td></tr>`);
-        body.appendChild(tb);
-      }
-      if (u.recent.length) {
-        body.appendChild(el("div", "section", "Recent replies"));
-        const tb = el("table", "t", `<tr><th>When</th><th>Model</th><th class="num">In</th><th class="num">Out</th><th class="num">Time</th><th class="num">Cost</th></tr>`);
-        for (const r of u.recent) tb.insertAdjacentHTML("beforeend", `<tr><td>${new Date(r.ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td>${esc(r.model)}</td><td class="num">${fmtNum(r.input + (r.cacheRead || 0))}</td><td class="num">${fmtNum(r.output)}</td><td class="num">${(r.ms / 1000).toFixed(1)}s</td><td class="num">${fmtCost(r.cost)}</td></tr>`);
-        body.appendChild(tb);
-      }
-      body.appendChild(el("div", "fine", exact ? "The terminal's own count covers only replies sent through it; Anthropic's figures cover everything billed to the account." : "Costs are estimates: token counts at list prices, recorded by this terminal only. The official figure is on console.anthropic.com."));
+      let note;
+      if (exact) note = `Figures from Anthropic, up to the minute (checked ${fmtAgo(exact.at)}).`;
+      else if (u.official && u.official.error) note = `Anthropic's figures could not be read (${esc(u.official.error)}); these are this terminal's estimates.`;
+      else note = "Estimates from this terminal's token counts. Add an ANTHROPIC_ADMIN_KEY secret for Anthropic's exact figures.";
+      body.appendChild(el("div", "fine", note));
     } catch (e) {
       body.textContent = "Could not load usage: " + e.message;
     }
