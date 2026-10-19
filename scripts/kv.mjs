@@ -31,10 +31,11 @@ if (!ns) {
   }
   ns = { id: m[1], title: "KV" };
 }
-const patched = toml.replace(/(\[\[kv_namespaces\]\][\s\S]*?\bid\s*=\s*)"[^"]*"/, `$1"${ns.id}"`);
-if (patched === toml) {
+const idLine = /(\[\[kv_namespaces\]\][\s\S]*?\bid\s*=\s*)"[^"]*"/;
+if (!idLine.test(toml)) {
   console.error("Could not find the kv_namespaces id in wrangler.toml");
   process.exit(1);
 }
-fs.writeFileSync("wrangler.toml", patched);
+const patched = toml.replace(idLine, `$1"${ns.id}"`);
+if (patched !== toml) fs.writeFileSync("wrangler.toml", patched);
 console.log(`KV namespace "${ns.title}" = ${ns.id}`);
