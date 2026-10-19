@@ -1,77 +1,74 @@
 # claude terminal
 
-A private workspace for US legal research and drafting with Claude, running on your own Anthropic API key. One password protects it; a browser that knows the password stays signed in for 30 days.
+A private website for legal research and drafting with Claude, meant to be shared with one person. It opens with an access key, runs on free hosting, and updates itself every time this repository changes.
 
-![node](https://img.shields.io/badge/node-22%2B-brightgreen) ![deploy](https://github.com/hmohyud/claude_terminal/actions/workflows/deploy.yml/badge.svg)
+![deploy](https://github.com/hmohyud/claude_terminal/actions/workflows/deploy.yml/badge.svg)
+
+## How it is put together
+
+- **The page** is static and lives on **GitHub Pages**.
+- **A small Cloudflare Worker** holds the Anthropic API key and the access key, talks to Claude, and keeps threads, files and settings in Cloudflare's KV storage. Nothing sensitive is ever in the page or in this repository.
+- **GitHub Actions** deploys both on every push to `main`: the Worker with Wrangler, then the page.
+
+Both Cloudflare Workers and GitHub Pages have free tiers that comfortably cover one person's daily use.
+
+## Set it up once (about 15 minutes)
+
+**1. A Cloudflare account** (free) at cloudflare.com. Then collect two values:
+
+- *Account ID*: in the dashboard open **Workers & Pages**; the Account ID is in the right-hand column.
+- *API token*: click your profile (top right) → **My Profile** → **API Tokens** → **Create Token** → use the **Edit Cloudflare Workers** template → **Continue to summary** → **Create Token**. Copy it now; it is shown once.
+- If Cloudflare asks you to pick a `workers.dev` subdomain under Workers & Pages, pick any name.
+
+**2. An access key.** Make up a long random key (20 or more characters; a password manager can generate one). This is what the lawyer types to unlock the site.
+
+**3. Put the four secrets in GitHub.** Open this repository → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**, one at a time:
+
+| name | value |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | the API token from step 1 |
+| `CLOUDFLARE_ACCOUNT_ID` | the Account ID from step 1 |
+| `ANTHROPIC_API_KEY` | your Anthropic API key |
+| `ACCESS_KEY` | the access key from step 2 |
+
+**4. Turn on GitHub Pages.** Repository → **Settings** → **Pages** → under *Build and deployment*, set **Source** to **GitHub Actions**. (The deploy tries to do this for you; check it if the first run complains.)
+
+**5. Deploy.** Push to `main`, or open the **Actions** tab, choose **deploy**, and click **Run workflow**. The first run takes two or three minutes and creates the KV storage by itself. When it is green, the site is at:
+
+`https://<your-github-username>.github.io/claude_terminal/`
+
+Send that link and the access key to the lawyer. Their browser stays signed in for 30 days after they enter the key.
+
+### Changing the access key or the API key
+
+Edit the secret in GitHub (same place as step 3), then run the **deploy** workflow again from the Actions tab. Changing the access key signs every browser out.
+
+## How secure is this
+
+- The access key and API key exist only as GitHub Actions secrets (encrypted, never shown again, masked in logs) and inside the Cloudflare Worker. They are not in the page, the repository, or anyone's browser.
+- Entering the key gives the browser a signed, expiring sign-in token. The token does not contain the key, and changing the key invalidates every token.
+- Guessing is throttled: ten attempts per minute per address, and after five wrong keys that address is locked out for growing periods up to an hour.
+- Everything travels over HTTPS (GitHub Pages and Cloudflare both provide it).
+- Anyone who can push to this repository can change what gets deployed and could read the secrets through a workflow, so keep the collaborator list to people you trust. Pull requests from forks never see the secrets.
+- What the lawyer types and uploads is sent to Anthropic's API under your account and is subject to Anthropic's terms. Threads and files sit in your Cloudflare account.
 
 ## What it does
 
-- **Built for legal work.** Claude is instructed to cite authority precisely, never invent citations, distinguish federal from state law, flag what may have changed since its training, and separate the rule from its application. Pick a jurisdiction per thread. One-click tasks: summarize, issue-spot, IRAC memo, plain English, key dates, risky clauses, compare drafts, defined terms, draft a letter, check citations.
-- **Documents in, documents out.** Drop in PDFs, Word files, images or text. Preview any of them in place. Download an answer as a Word document, print it, or save it to your files.
-- **Everything is kept.** Threads, files, settings and sign-in all persist on the machine running the terminal, so any browser with the password sees the same history. Storage is first in, first out: the newest 200 threads and 300 files (up to 1 GB) are kept, and the oldest are dropped when those caps are reached. You can change the caps in `.env`.
-- **Know what it costs.** Every answer shows its cost. The usage panel shows today, this week, this month and all time, what's left of a monthly budget you set, and your current rate limits.
-- Type `/help` in the message box for the keyboard commands.
-
-## Run it on your computer
-
-1. Install [Node.js](https://nodejs.org) (22 or newer) and run `npm install` in this folder.
-2. Copy `.env.example` to `.env`. Paste your API key after `ANTHROPIC_API_KEY=` and choose a password after `TERMINAL_PASSWORD=`.
-3. Run `npm start` and open http://127.0.0.1:3123.
-
-To change the password later, edit `.env` and restart. Everyone is signed out when it changes.
-
-## Put it on a server so it deploys itself
-
-Every push to `main` on GitHub tests and builds the code and deploys it to your server. You need a Linux server you can SSH into (a small VPS, a home server or a Raspberry Pi all work) and this repository under your GitHub account.
-
-**Step 1, on the server.** Log in as the user that should run the app and run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/hmohyud/claude_terminal/main/deploy/server-setup.sh -o server-setup.sh && bash server-setup.sh
-```
-
-It installs Docker if needed, creates an SSH deploy key, and prints the values for the next step. It also asks for your API key and password; you can type them there or press Enter to skip and keep them in GitHub instead.
-
-**Step 2, on GitHub.** Open the repository, then **Settings → Secrets and variables → Actions → New repository secret**. Add one secret per row:
-
-| secret | value |
-|---|---|
-| `DEPLOY_HOST` | the server's address (printed by the script) |
-| `DEPLOY_USER` | the user you ran the script as |
-| `DEPLOY_PATH` | the folder on the server, normally `~/claude-terminal` |
-| `DEPLOY_SSH_KEY` | the private key block the script printed, BEGIN and END lines included |
-
-If you skipped the key and password on the server, also add:
-
-| secret | value |
-|---|---|
-| `ANTHROPIC_API_KEY` | your Anthropic API key |
-| `TERMINAL_PASSWORD` | the password that unlocks the terminal (8 or more characters) |
-| `DOMAIN` | optional: a domain name pointing at the server. Gives you automatic HTTPS |
-
-**Step 3.** Push to `main`, or open the **Actions** tab and run **deploy**. The first run takes a couple of minutes; after that every push redeploys. Until the `DEPLOY_HOST` secret exists, pushes only run the checks.
-
-### Where the password lives, and how safe that is
-
-The password is never in the code or in the repository. It lives in one of two places, your choice:
-
-- **In `.env` on the server** (the script writes it, readable only by your user). GitHub never sees it.
-- **In GitHub Actions secrets**, if you add `TERMINAL_PASSWORD` there. GitHub stores secrets encrypted, never shows them again, and masks them in logs; each deploy writes them into `.env` on the server. Anyone who can push to this repository could write a workflow that reads them, so keep the repository's collaborator list to people you trust. Pull requests from forks never get secrets.
-
-Either way, the same protections apply once it is running:
-
-- The login cookie never contains the password. It is a signed, expiring token; the signature depends on the password and a server secret, so changing the password signs every browser out.
-- The cookie cannot be read by page scripts and is never sent by other sites. Every write also needs a header that other sites cannot add.
-- Five wrong guesses in a row lock that address out with delays that double each time, up to an hour, and every attempt is slowed slightly.
-- The API key stays on the server; browsers never receive it.
-- Without a domain the terminal is served over plain HTTP, which is fine on a home network or over Tailscale but not on the open internet. Give it a domain and it serves HTTPS with a certificate that renews itself.
-
-Prefer a hosted platform? Railway, Render and Fly.io can build the `Dockerfile` straight from this repository with their own auto-deploy. Set the variables from `.env.example` in their dashboard and mount a persistent disk at `/data`.
-
-## Your data
-
-Everything lives in `data/` next to the app (in Docker, the `claude-terminal-data` volume): threads, uploaded files, the usage history, your settings and budget, and the login secret. Messages you send go to Anthropic's API under your account and are subject to its terms. Costs shown are estimates from token counts at list prices; the official figure is on console.anthropic.com.
+- **Made for legal work.** Claude is told to cite authority precisely, never invent citations, distinguish federal from state law, flag what may have changed since its training, and separate the rule from its application. Each thread has a jurisdiction. One-click tasks: summarize, issue-spot, IRAC memo, plain English, key dates, risky clauses, compare drafts, defined terms, draft a letter, check citations.
+- **Color-coding.** Case names, reporter citations, statutes and rules, dates, deadlines, time periods, dollar amounts, defined terms, party roles and obligations are highlighted in answers and in document previews. Turn it off with the *Highlights* switch; the legend is in Settings.
+- **Two modes, plain effort.** *Simple questions* uses Claude Opus 5.5 (quicker and cheaper); *Complex questions* uses Claude Fable 5.1, Anthropic's most capable model. The effort menu says whether replies will be fast or slow.
+- **Documents in, documents out.** Drop in PDFs, Word files, images or text; preview any of them in place; download an answer as a Word document, print it, or save it to Files.
+- **Everything is kept** in your Cloudflare account, so any browser with the key sees the same threads. Storage is first in, first out: the newest 200 threads and 300 files (up to 1 GB) are kept and the oldest are dropped. The caps are in `wrangler.toml`.
+- **Costs are visible.** Every answer shows its cost; the usage panel shows today, this week, this month and all time, what is left of a monthly budget, and current rate limits.
+- Type `/help` in the message box for keyboard commands.
 
 ## For developers
 
-`npm run dev` restarts on changes. `npm test` runs a smoke test of the password gate, thread storage, settings and Word export. `docker compose up -d --build` runs it in Docker locally. The deploy workflow is [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), the server script is [`deploy/server-setup.sh`](deploy/server-setup.sh), and every setting is listed in [`.env.example`](.env.example).
+```bash
+npm install
+cp .dev.vars.example .dev.vars     # put a local access key and your API key in it
+npm run dev                        # http://localhost:8787 with a local KV store
+npm test                           # boots the Worker locally and checks the gate, storage and caps
+```
+
+Layout: `worker/index.js` is the Cloudflare Worker, `public/` is the page (also served by the Worker at its own URL), `wrangler.toml` configures the Worker, and `.github/workflows/deploy.yml` deploys both. `npm run vendor` refreshes the browser builds of the Word libraries in `public/vendor/`.

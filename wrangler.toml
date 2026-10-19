@@ -1,0 +1,41 @@
+# Cloudflare Worker that backs the terminal. Deployed by GitHub Actions with
+# Wrangler; `npm run dev` runs it locally with a local KV store.
+#
+# Secrets (never in this file): ACCESS_KEY, ANTHROPIC_API_KEY, optional
+# SESSION_SECRET. In production they come from GitHub Actions secrets; locally
+# from .dev.vars (see .dev.vars.example).
+name = "claude-terminal"
+main = "worker/index.js"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[vars]
+# Comma-separated list of browser origins allowed to call the API. The deploy
+# workflow sets this to your GitHub Pages origin.
+ALLOWED_ORIGIN = ""
+# Storage caps. Oldest threads/files are removed first (first in, first out).
+MAX_THREADS = "200"
+MAX_FILES = "300"
+MAX_FILES_MB = "1024"
+
+# Threads, files, settings and usage. The deploy workflow creates the namespace
+# and fills in the id; any value works for local development.
+[[kv_namespaces]]
+binding = "KV"
+id = "__KV_ID__"
+
+# Login attempts per IP per minute.
+[[ratelimits]]
+name = "LOGIN_LIMIT"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+# The same frontend GitHub Pages serves, so the Worker's own URL works too.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "none"
+
+[observability]
+enabled = true

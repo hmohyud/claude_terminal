@@ -3,8 +3,9 @@
 
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const API = String(window.CT_API || "").replace(/\/+$/, "");
   const PREFS_KEY = "claude-terminal.prefs";
-  const LEGACY_KEY = "claude-terminal.v1";
+  const TOKEN_KEY = "claude-terminal.token";
 
   const JURISDICTIONS = [
     "Federal (U.S.)", "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware",
@@ -29,21 +30,46 @@
     { label: "Check citations", hint: "Confidence in each authority cited", text: "List every case, statute, regulation and rule cited in your previous answer. For each one, say how confident you are that the citation is accurate and that it supports the proposition it was cited for, and flag anything that must be verified before use." },
   ];
 
+  // Two ways to work. Anything else is reachable with /model <name>.
+  const MODES = [
+    { id: "simple", model: "claude-opus-5-5", label: "Simple questions", desc: "Opus · quicker, cheaper", tier: 2 },
+    { id: "complex", model: "claude-fable-5-1", label: "Complex questions", desc: "Fable · most capable", tier: 3 },
+  ];
+  const EFFORT_LABELS = { low: "Quick · fast", medium: "Balanced", high: "Thorough · slower", xhigh: "Deep · slow", max: "Maximum · very slow" };
+  const EFFORT_RANK = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
+  const modeFor = (model) => MODES.find((m) => m.model === model) || null;
+  function speedHint(model, effort) {
+    const info = modelInfo(model);
+    const tier = modeFor(model) ? modeFor(model).tier : /fable|mythos/.test(model || "") ? 3 : /opus/.test(model || "") ? 2 : /haiku/.test(model || "") ? 0 : 1;
+    const eff = effort || (info && info.defaultEffort) || "high";
+    const score = tier + (EFFORT_RANK[eff] ?? 2);
+    if (score <= 2) return { cls: "fast", text: "replies will be fast" };
+    if (score <= 4) return { cls: "", text: "replies take a few seconds to a minute" };
+    if (score <= 5) return { cls: "slow", text: "replies will be slow (thinks hard)" };
+    return { cls: "very-slow", text: "replies will be very slow (maximum thinking)" };
+  }
+
+  // Patterns that get color-coded in answers and document previews.
+  const NUMWORD = "\\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty|thirty|forty-five|sixty|ninety|one hundred twenty|one hundred eighty";
+  const UNIT = "(?:business\\s|calendar\\s|court\\s)?(?:days?|months?|years?|weeks?|hours?)";
+  const LEGAL = [
+    { cls: "lg-case", title: "Case name", re: /\b(?:In\sre\s)?[A-Z][\w.'&-]*(?:\s(?:of|the|and|&|[A-Z][\w.'&-]*)){0,5}\sv\.\s[A-Z][\w.'&-]*(?:\s(?:of|the|and|&|[A-Z][\w.'&-]*)){0,5}/g },
+    { cls: "lg-cite", title: "Reporter citation", re: /\b\d{1,4}\s(?:U\.S\.|S\.\s?Ct\.|L\.\s?Ed\.\s?2d|F\.\s?(?:2d|3d|4th)|F\.\s?Supp\.(?:\s?[23]d)?|F\.\s?App'x|B\.R\.|WL|[A-Z][A-Za-z.']{0,12}(?:\s[A-Z][A-Za-z.']{0,12}){0,2}\s?(?:2d|3d|4th|5th)?)\s\d{1,7}(?:,\s?\d{1,5})?(?:\s\([^()]{0,40}\d{4}\))?/g },
+    { cls: "lg-stat", title: "Statute, regulation or rule", re: /\b\d{1,3}\s(?:U\.S\.C\.(?:A\.)?|C\.F\.R\.)\s§+\s?\d[\w.()-]*(?:\s?et\sseq\.)?|§+\s?\d[\w.()-]*(?:\s?et\sseq\.)?|\b(?:CPLR|UCC|U\.C\.C\.|FRCP|FRE|FRAP|Fed\.\s?R\.\s?(?:Civ|Crim|Evid|App|Bankr)\.\s?P\.|Rule)\s\d+[\w.()-]*/g },
+    { cls: "lg-date", title: "Date", re: /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s\d{1,2},?\s\d{4}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g },
+    { cls: "lg-deadline", title: "Deadline", re: new RegExp(`\\b(?:within|no\\slater\\sthan|not\\slater\\sthan|at\\sleast|not\\sless\\sthan|not\\smore\\sthan|on\\sor\\sbefore)\\s(?:${NUMWORD})(?:\\s?\\(\\d+\\))?\\s${UNIT}\\b`, "gi") },
+    { cls: "lg-period", title: "Time period", re: new RegExp(`\\b(?:${NUMWORD})(?:\\s?\\(\\d+\\))?[\\s-]${UNIT}\\b`, "gi") },
+    { cls: "lg-money", title: "Amount", re: /\$\s?\d[\d,]*(?:\.\d{1,2})?(?:\s?(?:million|billion|thousand))?\b/g },
+    { cls: "lg-term", title: "Defined term", re: /[“"][A-Z][A-Za-z0-9&'’-]*(?:\s[A-Z][A-Za-z0-9&'’-]*){0,5}[”"]/g },
+    { cls: "lg-party", title: "Party or role", re: /\b(?:Plaintiffs?|Defendants?|Petitioners?|Respondents?|Appellants?|Appellees?|Movants?|Landlords?|Tenants?|Lessors?|Lessees?|Licensors?|Licensees?|Buyers?|Sellers?|Purchasers?|Vendors?|Employers?|Employees?|Contractors?|Subcontractors?|Guarantors?|Borrowers?|Lenders?|Trustees?|Beneficiar(?:y|ies)|Grantors?|Grantees?|Indemnitors?|Indemnitees?|Insureds?|Insurers?|Debtors?|Creditors?|Executors?|Testators?|Settlors?)\b/g },
+    { cls: "lg-oblig", title: "Obligation", re: /\b(?:shall\snot|shall|must\snot|must|may\snot|is\srequired\sto|are\srequired\sto|waives?|waived|indemnif(?:y|ies|ied|ication))\b/g },
+  ];
+
   const state = {
-    index: [],
-    loaded: new Map(),
-    activeId: null,
-    settings: {},
-    prefs: { sidebar: true, activeId: null },
-    models: [],
-    limits: {},
-    legalPrompt: "",
-    defaultModel: "claude-opus-5-5",
-    streaming: null,
-    attachments: [],
-    histIdx: -1,
-    live: { budget: null, today: null, rateLimit: null },
-    saveTimers: new Map(),
+    index: [], loaded: new Map(), activeId: null, settings: {}, prefs: { sidebar: true, activeId: null },
+    models: [], limits: {}, legalPrompt: "", defaultModel: "claude-opus-5-5",
+    streaming: null, attachments: [], histIdx: -1, live: { budget: null, today: null, rateLimit: null },
+    saveTimers: new Map(), blobs: new Map(),
   };
 
   // ------------------------------------------------------------ helpers
@@ -62,6 +88,7 @@
     return new Date(ts).toLocaleDateString([], { month: "short", day: "numeric" });
   };
   const stamp = (ts) => new Date(ts || Date.now()).toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const safeFile = (s) => String(s || "document").replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 60) || "document";
   const el = (tag, cls, html) => {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -74,7 +101,6 @@
     b.addEventListener("click", onClick);
     return b;
   };
-
   function loadPrefs() {
     try {
       Object.assign(state.prefs, JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"));
@@ -89,14 +115,46 @@
       /* ignore */
     }
   }
+  const getToken = () => {
+    try {
+      return localStorage.getItem(TOKEN_KEY) || "";
+    } catch {
+      return "";
+    }
+  };
+  const setToken = (t) => {
+    try {
+      if (t) localStorage.setItem(TOKEN_KEY, t);
+      else localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      /* ignore */
+    }
+  };
 
-  async function api(path, { method = "GET", body, signal, raw } = {}) {
+  // Base64 helpers (files travel as base64 strings).
+  function bufToB64(buf) {
+    const bytes = new Uint8Array(buf);
+    let s = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  async function api(path, { method = "GET", body, signal } = {}) {
     const headers = { "X-Requested-With": "claude-terminal" };
-    if (body !== undefined && !raw) headers["Content-Type"] = "application/json";
-    const res = await fetch(path, { method, headers, body: raw ? body : body !== undefined ? JSON.stringify(body) : undefined, credentials: "same-origin", signal });
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const res = await fetch(API + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal });
     if (res.status === 401) {
+      setToken("");
       showLogin();
-      throw new Error("Logged out");
+      throw new Error("Signed out");
     }
     return res;
   }
@@ -116,23 +174,52 @@
     setTimeout(() => {
       URL.revokeObjectURL(a.href);
       a.remove();
-    }, 500);
+    }, 1000);
   }
   const downloadText = (text, name, mime = "text/plain") => downloadBlob(new Blob([text], { type: mime + ";charset=utf-8" }), name);
 
-  async function downloadDocx(markdown, title) {
+  const EXT = { python: "py", javascript: "js", typescript: "ts", json: "json", html: "html", css: "css", bash: "sh", sql: "sql", yaml: "yml", markdown: "md", csv: "csv", text: "txt", plaintext: "txt" };
+  const extFor = (lang) => EXT[(lang || "").toLowerCase()] || "txt";
+
+  // ------------------------------------------------------------ files (stored as base64 in KV)
+  async function fetchFile(f) {
+    if (state.blobs.has(f.id)) return state.blobs.get(f.id);
+    const data = await apiJson(`/api/files/${f.id}`);
+    const bytes = b64ToBytes(data.b64);
+    const entry = { bytes, text: data.text, blob: new Blob([bytes], { type: f.mime || "application/octet-stream" }), url: null };
+    entry.url = URL.createObjectURL(entry.blob);
+    state.blobs.set(f.id, entry);
+    return entry;
+  }
+  async function downloadFile(f) {
     try {
-      const res = await api("/api/export/docx", { method: "POST", body: { title, markdown } });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
-      downloadBlob(await res.blob(), `${safeFile(title)}.docx`);
+      const { blob } = await fetchFile(f);
+      downloadBlob(blob, f.name);
     } catch (e) {
-      note(`Word export failed: ${e.message}`);
+      note(`Download failed: ${e.message}`);
     }
   }
-  const safeFile = (s) => String(s || "document").replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 60) || "document";
-
-  const EXT = { python: "py", py: "py", javascript: "js", js: "js", typescript: "ts", ts: "ts", json: "json", html: "html", css: "css", bash: "sh", sh: "sh", shell: "sh", powershell: "ps1", sql: "sql", yaml: "yml", yml: "yml", markdown: "md", md: "md", go: "go", rust: "rs", java: "java", c: "c", cpp: "cpp", csharp: "cs", php: "php", ruby: "rb", swift: "swift", xml: "xml", diff: "diff", text: "txt", txt: "txt", plaintext: "txt", csv: "csv" };
-  const extFor = (lang) => EXT[(lang || "").toLowerCase()] || "txt";
+  async function uploadFiles(files, { attach = true, source } = {}) {
+    const added = [];
+    for (const file of files) {
+      try {
+        const buf = await file.arrayBuffer();
+        const body = { name: file.name || "pasted", type: file.type || "", source, b64: bufToB64(buf) };
+        if (/\.docx$/i.test(file.name || "")) {
+          if (!window.mammoth) throw new Error("the Word reader has not loaded yet; try again in a moment");
+          body.text = (await mammoth.extractRawText({ arrayBuffer: buf })).value;
+        }
+        const entry = await apiJson("/api/upload", { method: "POST", body });
+        added.push(entry);
+        if (attach) state.attachments.push(entry);
+        if (entry.evicted) note(`Storage is full: the ${entry.evicted} oldest file(s) were removed to make room (first in, first out).`);
+      } catch (e) {
+        note(`Upload failed for ${file.name || "file"}: ${e.message}`);
+      }
+    }
+    renderAttachments();
+    return added;
+  }
 
   // ------------------------------------------------------------ threads
   const active = () => (state.activeId && state.loaded.get(state.activeId)) || null;
@@ -140,7 +227,6 @@
   const summaryOf = (t) => ({ id: t.id, title: t.title, createdAt: t.createdAt, updatedAt: t.updatedAt, cost: t.cost || 0, count: t.messages.filter((m) => m.role !== "note").length, jurisdiction: t.jurisdiction, model: t.model });
 
   function newThread() {
-    // Reuse the current thread if it is still empty.
     const cur = active();
     if (cur && !cur.messages.length && cur.title === "New thread") {
       $("#input").focus();
@@ -159,11 +245,8 @@
     $("#input").focus();
     return t;
   }
-  function ensureThread() {
-    return active() || newThread();
-  }
+  const ensureThread = () => active() || newThread();
   function setActive(id) {
-    // Drop an abandoned empty thread.
     const prev = active();
     if (prev && prev.id !== id && prev.unsaved && !prev.messages.length) {
       state.loaded.delete(prev.id);
@@ -173,7 +256,6 @@
     state.prefs.activeId = id;
     savePrefs();
   }
-
   function saveThread(t, immediate) {
     if (!t) return;
     t.updatedAt = Date.now();
@@ -185,16 +267,19 @@
       state.saveTimers.delete(t.id);
       try {
         const { unsaved, ...body } = t;
-        await apiJson(`/api/threads/${t.id}`, { method: "PUT", body });
+        const r = await apiJson(`/api/threads/${t.id}`, { method: "PUT", body });
         delete t.unsaved;
+        if (r.evicted) {
+          note(`Thread storage is full: the ${r.evicted} oldest thread(s) were removed to make room (first in, first out).`);
+          refreshIndex().then(renderSidebar).catch(() => {});
+        }
       } catch (e) {
-        note(`Could not save this thread: ${e.message}`);
+        if (e.message !== "Signed out") note(`Could not save this thread: ${e.message}`);
       }
     };
     if (immediate) run();
     else state.saveTimers.set(t.id, setTimeout(run, 600));
   }
-
   async function openThread(id) {
     if (!state.loaded.has(id)) {
       try {
@@ -211,7 +296,6 @@
     renderAll();
     $("#input").focus();
   }
-
   async function deleteThread(id) {
     const s = state.index.find((x) => x.id === id);
     if (s && s.count && !confirm(`Delete "${s.title}"?`)) return;
@@ -233,36 +317,11 @@
     }
     renderAll();
   }
-
   async function refreshIndex() {
     const r = await apiJson("/api/threads");
     state.index = r.threads;
     state.limits.threads = r.limit;
-    // Keep threads we created locally but haven't saved yet.
     for (const t of state.loaded.values()) if (t.unsaved && !state.index.find((s) => s.id === t.id)) state.index.unshift(summaryOf(t));
-  }
-
-  // Bring threads saved by the older browser-only version onto the server, once.
-  async function migrateLegacy() {
-    let raw;
-    try {
-      raw = JSON.parse(localStorage.getItem(LEGACY_KEY) || "null");
-    } catch {
-      raw = null;
-    }
-    if (!raw || !Array.isArray(raw.convs) || !raw.convs.length) return;
-    let moved = 0;
-    for (const c of raw.convs) {
-      if (!c || !c.id || !/^[a-z0-9]{6,24}$/.test(c.id) || !Array.isArray(c.messages)) continue;
-      try {
-        await apiJson(`/api/threads/${c.id}`, { method: "PUT", body: { ...c, title: c.title || "Untitled", jurisdiction: null } });
-        moved += 1;
-      } catch {
-        /* skip */
-      }
-    }
-    localStorage.removeItem(LEGACY_KEY);
-    if (moved) await refreshIndex();
   }
 
   function toApiMessages(msgs) {
@@ -280,7 +339,6 @@
     }
     return out;
   }
-
   function composeSystem(t) {
     const base = (t.system && t.system.trim()) || (state.settings.systemPrompt && state.settings.systemPrompt.trim()) || state.legalPrompt || "";
     const extras = [];
@@ -288,11 +346,50 @@
     extras.push(`Today's date: ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}.`);
     return base ? `${base}\n\n${extras.join(" ")}` : extras.join(" ");
   }
-
   function note(text) {
     const t = ensureThread();
     t.messages.push({ id: uid(), role: "note", text, ts: Date.now() });
     renderTranscript();
+  }
+
+  // ------------------------------------------------------------ legal highlighting
+  function highlightLegal(container) {
+    if (state.settings.highlight === false) return;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.nodeValue.trim().length < 3 || n.parentElement.closest("code, pre, a, .lg, script, style, textarea") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    const nodes = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const found = [];
+      for (const p of LEGAL) {
+        p.re.lastIndex = 0;
+        let m;
+        while ((m = p.re.exec(text))) {
+          if (!m[0]) {
+            p.re.lastIndex += 1;
+            continue;
+          }
+          found.push({ start: m.index, end: m.index + m[0].length, cls: p.cls, title: p.title });
+        }
+      }
+      if (!found.length) continue;
+      found.sort((a, b) => a.start - b.start || b.end - a.end);
+      const frag = document.createDocumentFragment();
+      let pos = 0;
+      for (const f of found) {
+        if (f.start < pos) continue;
+        if (f.start > pos) frag.appendChild(document.createTextNode(text.slice(pos, f.start)));
+        const span = el("span", `lg ${f.cls}`);
+        span.title = f.title;
+        span.textContent = text.slice(f.start, f.end);
+        frag.appendChild(span);
+        pos = f.end;
+      }
+      if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+      node.replaceWith(frag);
+    }
   }
 
   // ------------------------------------------------------------ rendering
@@ -302,7 +399,6 @@
     renderTranscript();
     renderAttachments();
   }
-
   function renderSidebar() {
     const list = $("#thread-list");
     list.innerHTML = "";
@@ -327,47 +423,50 @@
     }
     $("#app").classList.toggle("no-sidebar", !state.prefs.sidebar);
   }
-
   function fillSelect(sel, options, value) {
     sel.innerHTML = "";
     for (const o of options) sel.appendChild(o instanceof Option ? o : new Option(o, o));
     sel.value = value;
   }
-
   function renderTopbar() {
     const t = active();
     $("#thread-title").textContent = t ? t.title : "New thread";
     const model = t ? t.model : state.settings.model || state.defaultModel;
-    const opts = state.models.map((m) => {
-      const o = new Option(m.name + (m.in != null ? `  ·  $${m.in}/$${m.out}` : ""), m.id);
-      o.title = m.in != null ? `${m.display}: $${m.in} per million input tokens, $${m.out} per million output tokens` : m.display;
+    const opts = MODES.map((m) => {
+      const info = modelInfo(m.model);
+      const o = new Option(`${m.label} · ${m.desc}`, m.model);
+      o.title = info && info.in != null ? `${info.display}: $${info.in} per million input tokens, $${info.out} per million output tokens` : m.model;
       return o;
     });
-    if (model && !state.models.find((m) => m.id === model)) opts.unshift(new Option(model, model));
+    if (model && !modeFor(model)) opts.push(new Option(`Custom · ${model}`, model));
     fillSelect($("#model"), opts, model);
-    const jur = t ? t.jurisdiction || "" : state.settings.jurisdiction || "";
-    fillSelect($("#jurisdiction"), [new Option("none", ""), ...JURISDICTIONS.map((j) => new Option(j, j))], jur);
+    fillSelect($("#jurisdiction"), [new Option("none", ""), ...JURISDICTIONS.map((j) => new Option(j, j))], t ? t.jurisdiction || "" : state.settings.jurisdiction || "");
+    $("#highlight").checked = state.settings.highlight !== false;
+    document.body.classList.toggle("no-highlight", state.settings.highlight === false);
     renderEffortOptions();
     renderStats();
     renderUsageChip();
   }
-
   function renderEffortOptions() {
     const t = active();
     const info = modelInfo(t ? t.model : state.settings.model || state.defaultModel);
     const efforts = info ? info.efforts : [];
     const sel = $("#effort");
-    fillSelect(sel, [new Option(info && info.defaultEffort ? `default (${info.defaultEffort})` : "default", ""), ...efforts.map((e) => new Option(e, e))], efforts.includes(state.settings.effort) ? state.settings.effort : "");
+    const def = info && info.defaultEffort ? `Default (${EFFORT_LABELS[info.defaultEffort] || info.defaultEffort})` : "Default";
+    const current = efforts.includes(state.settings.effort) ? state.settings.effort : "";
+    fillSelect(sel, [new Option(def, ""), ...efforts.map((e) => new Option(EFFORT_LABELS[e] || e, e))], current);
     sel.disabled = efforts.length === 0;
+    const hint = speedHint(t ? t.model : state.settings.model || state.defaultModel, current);
+    const h = $("#speed-hint");
+    h.textContent = hint.text;
+    h.className = `speed ${hint.cls}`;
   }
-
   function renderStats() {
     const t = active();
     const s = $("#thread-stats");
     if (!t || !t.messages.length) return (s.textContent = "");
     s.textContent = `${fmtNum(t.tokens.in)} in · ${fmtNum(t.tokens.out)} out · ${fmtCost(t.cost)} this thread`;
   }
-
   function renderUsageChip() {
     const chip = $("#usage-chip");
     const b = state.live.budget;
@@ -377,13 +476,11 @@
       parts.push(`month ${fmtCost(b.spent)}`);
       if (b.monthly != null) {
         const pct = b.monthly > 0 ? b.spent / b.monthly : 1;
-        const cls = pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok";
-        parts.push(`<span class="${cls}">${fmtCost(Math.max(0, b.remaining))} left</span>`);
+        parts.push(`<span class="${pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok"}">${fmtCost(Math.max(0, b.remaining))} left</span>`);
       }
     }
     chip.innerHTML = parts.length ? parts.join(" · ") : "usage";
   }
-
   function renderTemplates() {
     const box = $("#templates");
     box.innerHTML = "";
@@ -393,7 +490,6 @@
       box.appendChild(b);
     }
   }
-
   function useTemplate(tpl) {
     const input = $("#input");
     input.value = input.value.trim() ? input.value.replace(/\s*$/, "\n\n") + tpl.text : tpl.text;
@@ -401,7 +497,6 @@
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
   }
-
   function renderTranscript() {
     const box = $("#transcript");
     const t = active();
@@ -424,7 +519,6 @@
     for (const m of t.messages) box.appendChild(renderMessage(m, t));
     if (wasBottom) box.scrollTop = box.scrollHeight;
   }
-
   function atBottom() {
     const b = $("#transcript");
     return b.scrollHeight - b.scrollTop - b.clientHeight < 60;
@@ -437,8 +531,8 @@
     a.addEventListener("click", () => openPreview(f));
     if (f.kind === "image") {
       const img = el("img");
-      img.src = `/api/files/${f.id}?inline=1`;
       img.alt = "";
+      fetchFile(f).then((e) => (img.src = e.url)).catch(() => {});
       a.appendChild(img);
     } else a.appendChild(el("span", "", KIND_ICON[f.kind] || "≡"));
     a.appendChild(el("span", "fname", esc(f.name)));
@@ -451,10 +545,11 @@
       rm.title = "Remove";
       a.appendChild(rm);
     } else {
-      const dl = el("a", "dl", "↓");
-      dl.href = `/api/files/${f.id}`;
+      const dl = btn("↓", (e) => {
+        e.stopPropagation();
+        downloadFile(f);
+      }, "dl");
       dl.title = `Download ${f.name}`;
-      dl.addEventListener("click", (e) => e.stopPropagation());
       a.appendChild(dl);
     }
     return a;
@@ -485,13 +580,11 @@
     }));
     head.appendChild(actions);
     root.appendChild(head);
-
     if (m.files && m.files.length) {
       const files = el("div", "files");
       for (const f of m.files) files.appendChild(fileChip(f));
       root.appendChild(files);
     }
-
     if (m.role === "assistant") {
       const think = el("details", "thinking" + (m.thinking ? "" : " hidden"));
       think.appendChild(el("summary", "", "Reasoning summary"));
@@ -503,12 +596,9 @@
       const meta = el("div", "meta");
       renderMeta(meta, m);
       root.appendChild(meta);
-    } else {
-      root.appendChild(el("div", "body", esc(m.text || "")));
-    }
+    } else root.appendChild(el("div", "body", esc(m.text || "")));
     return root;
   }
-
   function renderMarkdown(text) {
     if (window.marked && window.DOMPurify) {
       try {
@@ -519,7 +609,6 @@
     }
     return `<pre class="plain">${esc(text)}</pre>`;
   }
-
   function renderBody(body, m, final) {
     if (m.meta && m.meta.error && !m.text) {
       body.className = "body error";
@@ -528,10 +617,12 @@
     }
     body.className = "body md" + (m.pending && !final ? " cursor" : "");
     body.innerHTML = renderMarkdown(m.text || "");
-    if (final) decorateCode(body);
+    if (final) {
+      decorateCode(body);
+      highlightLegal(body);
+    }
     if (m.meta && m.meta.error && m.text) body.appendChild(el("div", "error", "Error: " + esc(m.meta.error)));
   }
-
   function decorateCode(container) {
     for (const pre of $$("pre", container)) {
       const code = pre.querySelector("code");
@@ -556,7 +647,6 @@
       a.rel = "noopener";
     }
   }
-
   function renderMeta(meta, m) {
     const x = m.meta || {};
     const bits = [];
@@ -573,9 +663,7 @@
     if (x.stopped) bits.push(`<span class="stop-bad">stopped</span>`);
     meta.innerHTML = bits.map((b) => `<span>${b}</span>`).join("");
   }
-
   const msgEl = (m) => $(`#transcript [data-mid="${m.id}"]`);
-
   let renderQueued = false;
   function scheduleStreamRender() {
     if (renderQueued) return;
@@ -604,7 +692,6 @@
       if (wasBottom) $("#transcript").scrollTop = $("#transcript").scrollHeight;
     });
   }
-
   function printMessage(m) {
     const root = msgEl(m);
     if (!root) return;
@@ -619,8 +706,6 @@
     window.print();
     setTimeout(cleanup, 2000);
   }
-
-  // ------------------------------------------------------------ attachments
   function renderAttachments() {
     const box = $("#attachments");
     box.innerHTML = "";
@@ -632,25 +717,6 @@
       } }));
     });
   }
-
-  async function uploadFiles(files, { attach = true, source } = {}) {
-    const added = [];
-    for (const file of files) {
-      try {
-        const q = new URLSearchParams({ name: file.name || "pasted", type: file.type || "" });
-        if (source) q.set("source", source);
-        const entry = await apiJson(`/api/upload?${q}`, { method: "POST", body: file, raw: true });
-        added.push(entry);
-        if (attach) state.attachments.push(entry);
-        if (entry.evicted) note(`Storage is full: the ${entry.evicted} oldest file(s) were removed to make room (first in, first out).`);
-      } catch (e) {
-        note(`Upload failed: ${e.message}`);
-      }
-    }
-    renderAttachments();
-    return added;
-  }
-
   async function saveToFiles(m, t) {
     const name = `${safeFile(t.title)}-${stamp(m.ts)}.md`;
     const added = await uploadFiles([new File([m.text || ""], name, { type: "text/markdown" })], { attach: false, source: "assistant" });
@@ -675,30 +741,48 @@
 
   async function streamInto(t, am) {
     const ctrl = new AbortController();
-    state.streaming = { ctrl, threadId: t.id, msg: am };
+    const s = { ctrl, threadId: t.id, msg: am, usage: null, started: Date.now() };
+    state.streaming = s;
     document.body.classList.add("streaming");
     const info = modelInfo(t.model);
     const body = {
-      conv: t.id,
-      model: t.model || state.settings.model || state.defaultModel,
-      system: composeSystem(t),
+      conv: t.id, model: t.model || state.settings.model || state.defaultModel, system: composeSystem(t),
       messages: toApiMessages(t.messages.filter((m) => m !== am)),
       effort: info && info.efforts.includes(state.settings.effort) ? state.settings.effort : null,
-      maxTokens: state.settings.maxTokens || 16000,
-      showThinking: state.settings.showThinking !== false,
-      fallbacks: state.settings.fallbacks !== false,
+      maxTokens: state.settings.maxTokens || 16000, showThinking: state.settings.showThinking !== false, fallbacks: state.settings.fallbacks !== false,
     };
     try {
       const res = await api("/api/chat", { method: "POST", body, signal: ctrl.signal });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
-      await readSSE(res, (ev) => handleEvent(ev, t, am));
+      try {
+        const rl = JSON.parse(res.headers.get("X-Anthropic-RateLimit") || "null");
+        if (rl && Object.keys(rl).length) state.live.rateLimit = { at: Date.now(), ...rl };
+      } catch {
+        /* ignore */
+      }
+      await readSSE(res, (ev) => handleEvent(ev, s, am));
     } catch (e) {
       if (e.name === "AbortError") am.meta.stopped = true;
-      else am.meta.error = e.message;
+      else if (e.message !== "Signed out") am.meta.error = e.message;
     } finally {
       delete am.pending;
+      am.meta.ms = Date.now() - s.started;
+      if (s.usage) am.meta.usage = s.usage;
       state.streaming = null;
       document.body.classList.remove("streaming");
+      if (s.usage) {
+        t.tokens.in += (s.usage.input_tokens || 0) + (s.usage.cache_read_input_tokens || 0) + (s.usage.cache_creation_input_tokens || 0);
+        t.tokens.out += s.usage.output_tokens || 0;
+        try {
+          const r = await apiJson("/api/usage", { method: "POST", body: { model: am.meta.model || t.model, conv: t.id, usage: s.usage, ms: am.meta.ms, stop: am.meta.stop_reason } });
+          am.meta.cost = r.cost;
+          if (r.cost) t.cost = (t.cost || 0) + r.cost;
+          state.live.budget = r.budget || state.live.budget;
+          state.live.today = r.today;
+        } catch {
+          /* usage report is best-effort */
+        }
+      }
       saveThread(t, true);
       const root = msgEl(am);
       if (root) {
@@ -713,6 +797,7 @@
     }
   }
 
+  // Reads the Messages API stream as the Worker passes it through, untouched.
   async function readSSE(res, onEvent) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -725,65 +810,65 @@
       while ((i = buf.indexOf("\n\n")) >= 0) {
         const chunk = buf.slice(0, i);
         buf = buf.slice(i + 2);
-        for (const line of chunk.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            onEvent(JSON.parse(line.slice(6)));
-          } catch (e) {
-            console.warn("bad event", line, e);
-          }
+        let data = "";
+        for (const line of chunk.split("\n")) if (line.startsWith("data:")) data += line.slice(5).trim();
+        if (!data) continue;
+        try {
+          onEvent(JSON.parse(data));
+        } catch (e) {
+          console.warn("bad event", chunk, e);
         }
       }
     }
   }
-
-  function handleEvent(ev, t, am) {
-    switch (ev.t) {
-      case "start":
-        am.meta.model = ev.model;
+  function handleEvent(ev, s, am) {
+    switch (ev.type) {
+      case "message_start": {
+        const msg = ev.message || {};
+        if (msg.model) am.meta.model = msg.model;
+        const u = msg.usage || {};
+        s.usage = { input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0, cache_read_input_tokens: u.cache_read_input_tokens || 0, cache_creation_input_tokens: u.cache_creation_input_tokens || 0 };
         break;
-      case "think":
-        am.thinking += ev.v;
-        scheduleStreamRender();
+      }
+      case "content_block_start": {
+        const cb = ev.content_block || {};
+        if (cb.type === "fallback") am.meta.fallback = `${(cb.from && cb.from.model) || "?"} → ${(cb.to && cb.to.model) || "?"}`;
         break;
-      case "text":
-        am.text += ev.v;
-        scheduleStreamRender();
+      }
+      case "content_block_delta": {
+        const d = ev.delta || {};
+        if (d.type === "text_delta" && d.text) {
+          am.text += d.text;
+          scheduleStreamRender();
+        } else if (d.type === "thinking_delta" && d.thinking && state.settings.showThinking !== false) {
+          am.thinking += d.thinking;
+          scheduleStreamRender();
+        }
         break;
-      case "fallback":
-        am.meta.fallback = `${ev.from || "?"} → ${ev.to || "?"}`;
-        break;
-      case "done":
-        am.meta.model = ev.model;
-        am.meta.usage = ev.usage;
-        am.meta.cost = ev.cost;
-        am.meta.ms = ev.ms;
-        am.meta.stop_reason = ev.stop_reason;
+      }
+      case "message_delta": {
+        const d = ev.delta || {};
+        if (d.stop_reason) am.meta.stop_reason = d.stop_reason;
+        if (d.stop_reason === "refusal") {
+          const sd = d.stop_details || {};
+          am.meta.error = `Claude declined this request${sd.category ? ` (${sd.category})` : ""}${sd.explanation ? ": " + sd.explanation : "."}`;
+        }
         if (ev.usage) {
-          t.tokens.in += (ev.usage.input_tokens || 0) + (ev.usage.cache_read_input_tokens || 0) + (ev.usage.cache_creation_input_tokens || 0);
-          t.tokens.out += ev.usage.output_tokens || 0;
-        }
-        if (ev.cost) t.cost = (t.cost || 0) + ev.cost;
-        state.live.budget = ev.budget || state.live.budget;
-        state.live.today = ev.today;
-        if (ev.rateLimit) state.live.rateLimit = ev.rateLimit;
-        if (ev.stop_reason === "refusal") {
-          const d = ev.stop_details || {};
-          am.meta.error = `Claude declined this request${d.category ? ` (${d.category})` : ""}${d.explanation ? ": " + d.explanation : "."}`;
+          s.usage = s.usage || { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+          for (const k of Object.keys(s.usage)) if (ev.usage[k] != null) s.usage[k] = ev.usage[k];
         }
         break;
+      }
       case "error":
-        am.meta.error = (ev.status ? ev.status + " " : "") + ev.message;
+        am.meta.error = (ev.error && ev.error.message) || "The stream reported an error.";
         break;
       default:
         break;
     }
   }
-
   function stopStreaming() {
     if (state.streaming) state.streaming.ctrl.abort();
   }
-
   async function retryFrom(t, m) {
     if (state.streaming) return;
     const idx = t.messages.indexOf(m);
@@ -794,7 +879,6 @@
     renderTranscript();
     await streamInto(t, am);
   }
-
   function editFrom(t, m) {
     if (state.streaming) return;
     const idx = t.messages.indexOf(m);
@@ -810,6 +894,98 @@
     input.focus();
   }
 
+  // ------------------------------------------------------------ Word export (in the browser)
+  function markdownToDocx(markdown, title) {
+    const D = window.docx;
+    if (!D || !window.marked) throw new Error("the Word writer has not loaded yet; try again in a moment");
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, AlignmentType, ShadingType, ExternalHyperlink, LevelFormat } = D;
+    const HEADINGS = [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3, HeadingLevel.HEADING_4, HeadingLevel.HEADING_5, HeadingLevel.HEADING_6];
+    const numberings = [];
+    const newNumbering = (start) => {
+      const reference = `num-${numberings.length + 1}`;
+      numberings.push({ reference, levels: [0, 1, 2, 3].map((level) => ({ level, format: LevelFormat.DECIMAL, text: `%${level + 1}.`, alignment: AlignmentType.START, start: level === 0 ? Math.max(1, Number(start) || 1) : 1, style: { paragraph: { indent: { left: 720 * (level + 1), hanging: 360 } } } })) });
+      return reference;
+    };
+    const indentOf = (depth) => (depth ? { left: 720 * depth } : undefined);
+    function runs(tokens, style = {}) {
+      const out = [];
+      for (const t of tokens || []) {
+        switch (t.type) {
+          case "strong": out.push(...runs(t.tokens, { ...style, bold: true })); break;
+          case "em": out.push(...runs(t.tokens, { ...style, italics: true })); break;
+          case "del": out.push(...runs(t.tokens, { ...style, strike: true })); break;
+          case "codespan": out.push(new TextRun({ text: t.text, font: "Consolas", ...style })); break;
+          case "br": out.push(new TextRun({ text: "", break: 1 })); break;
+          case "link": out.push(new ExternalHyperlink({ link: t.href, children: runs(t.tokens, { ...style, style: "Hyperlink" }) })); break;
+          case "image": out.push(new TextRun({ text: `[image: ${t.text || t.href}]`, italics: true, ...style })); break;
+          default:
+            if (t.tokens && t.tokens.length) out.push(...runs(t.tokens, style));
+            else if (typeof t.text === "string") out.push(new TextRun({ text: t.text, ...style }));
+        }
+      }
+      return out;
+    }
+    function listItem(item, ref, level, depth) {
+      const out = [];
+      for (const sub of item.tokens || []) {
+        if (sub.type === "list") {
+          const subRef = sub.ordered ? newNumbering(sub.start) : null;
+          for (const it of sub.items) out.push(...listItem(it, subRef, level + 1, depth));
+          continue;
+        }
+        const r = runs(sub.tokens && sub.tokens.length ? sub.tokens : [{ type: "text", text: sub.text || sub.raw || "" }]);
+        out.push(new Paragraph({ children: r, ...(ref ? { numbering: { reference: ref, level } } : { bullet: { level } }), spacing: { after: 60 } }));
+      }
+      return out;
+    }
+    function blocks(tokens, depth = 0) {
+      const out = [];
+      for (const t of tokens) {
+        switch (t.type) {
+          case "heading": out.push(new Paragraph({ heading: HEADINGS[Math.min(Math.max(t.depth, 1), 6) - 1], children: runs(t.tokens), indent: indentOf(depth) })); break;
+          case "paragraph":
+          case "text": out.push(new Paragraph({ children: runs(t.tokens && t.tokens.length ? t.tokens : [{ type: "text", text: t.text || "" }]), spacing: { after: 160 }, indent: indentOf(depth) })); break;
+          case "list": {
+            const ref = t.ordered ? newNumbering(t.start) : null;
+            for (const item of t.items) out.push(...listItem(item, ref, 0, depth));
+            out.push(new Paragraph({ text: "", spacing: { after: 60 } }));
+            break;
+          }
+          case "blockquote": out.push(...blocks(t.tokens, depth + 1)); break;
+          case "code":
+            for (const line of String(t.text).split("\n")) out.push(new Paragraph({ children: [new TextRun({ text: line, font: "Consolas", size: 18 })], shading: { type: ShadingType.CLEAR, fill: "F2F2F2" }, spacing: { after: 0 }, indent: indentOf(depth) }));
+            out.push(new Paragraph({ text: "", spacing: { after: 120 } }));
+            break;
+          case "hr": out.push(new Paragraph({ thematicBreak: true })); break;
+          case "table": {
+            const row = (cells, header) => new TableRow({ tableHeader: header, children: cells.map((c) => new TableCell({ children: [new Paragraph({ children: runs(c.tokens, header ? { bold: true } : {}) })], shading: header ? { type: ShadingType.CLEAR, fill: "E8EEF5" } : undefined })) });
+            out.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [row(t.header, true), ...t.rows.map((r) => row(r, false))] }));
+            out.push(new Paragraph({ text: "", spacing: { after: 120 } }));
+            break;
+          }
+          case "html": out.push(new Paragraph({ text: String(t.text || ""), indent: indentOf(depth) })); break;
+          default: break;
+        }
+      }
+      return out;
+    }
+    const body = blocks(marked.lexer(markdown));
+    if (!numberings.length) newNumbering(1);
+    const doc = new Document({
+      creator: "claude terminal", title: title || "Document", numbering: { config: numberings },
+      styles: { default: { document: { run: { font: "Calibri", size: 22 } } } },
+      sections: [{ children: [...(title ? [new Paragraph({ text: title, heading: HeadingLevel.TITLE })] : []), ...body] }],
+    });
+    return Packer.toBlob(doc);
+  }
+  async function downloadDocx(markdown, title) {
+    try {
+      downloadBlob(await markdownToDocx(markdown, title), `${safeFile(title)}.docx`);
+    } catch (e) {
+      note(`Word export failed: ${e.message}`);
+    }
+  }
+
   // ------------------------------------------------------------ thread menu + export
   function threadMarkdown(t) {
     const lines = [`# ${t.title}`, "", `Jurisdiction: ${t.jurisdiction || "not set"}  `, `Model: ${t.model}  `, `Exported: ${new Date().toLocaleString()}`, ""];
@@ -821,7 +997,6 @@
     }
     return lines.join("\n");
   }
-
   async function threadAction(act) {
     const t = active();
     $("#thread-menu").classList.add("hidden");
@@ -841,14 +1016,10 @@
         $("#instructions-panel").classList.remove("hidden");
         $("#thread-system").focus();
         return;
-      case "docx":
-        return downloadDocx(threadMarkdown(t), t.title);
-      case "md":
-        return downloadText(threadMarkdown(t), `${safeFile(t.title)}.md`, "text/markdown");
-      case "json":
-        return downloadText(JSON.stringify(t, null, 2), `${safeFile(t.title)}.json`, "application/json");
-      case "print":
-        return window.print();
+      case "docx": return downloadDocx(threadMarkdown(t), t.title);
+      case "md": return downloadText(threadMarkdown(t), `${safeFile(t.title)}.md`, "text/markdown");
+      case "json": return downloadText(JSON.stringify(t, null, 2), `${safeFile(t.title)}.json`, "application/json");
+      case "print": return window.print();
       case "clear":
         if (!t.messages.length || confirm("Remove every message in this thread?")) {
           t.messages = [];
@@ -858,10 +1029,8 @@
           renderAll();
         }
         return;
-      case "delete":
-        return deleteThread(t.id);
-      default:
-        return;
+      case "delete": return deleteThread(t.id);
+      default: return;
     }
   }
 
@@ -871,9 +1040,10 @@
   /title <text>         rename this thread
   /jurisdiction <name>  set the jurisdiction for this thread (e.g. /jurisdiction Texas, or none)
   /system [text|clear]  instructions for this thread only
-  /model [name]         show or switch model (e.g. /model sonnet) · /models lists them with prices
-  /effort <level>       low · medium · high · xhigh · max · default
+  /model simple|complex|<name>   switch mode or pick any model · /models lists them with prices
+  /effort <level>       low (fast) · medium · high (slower) · xhigh (slow) · max (very slow) · default
   /thinking on|off      show the reasoning summary
+  /highlight on|off     color-code legal references
   /max <n>              longest reply, in tokens
   /fallback on|off      retry on another model if a reply is refused by safety filters
   /retry · /undo        regenerate the last answer · remove the last exchange
@@ -892,16 +1062,11 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     const arg = line.slice(1).trim().slice(cmd.length).trim();
     const t = active();
     switch ((cmd || "").toLowerCase()) {
-      case "help":
-        return note(HELP);
-      case "new":
-        return newThread();
-      case "clear":
-        return threadAction("clear");
-      case "delete":
-        return threadAction("delete");
-      case "print":
-        return threadAction("print");
+      case "help": return note(HELP);
+      case "new": return newThread();
+      case "clear": return threadAction("clear");
+      case "delete": return threadAction("delete");
+      case "print": return threadAction("print");
       case "title":
         if (t && arg) {
           t.title = arg.slice(0, 120);
@@ -923,13 +1088,13 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       case "model": {
         if (!arg) return note(`Model: ${t ? t.model : state.settings.model || state.defaultModel}`);
         const q = arg.toLowerCase();
-        const m = state.models.find((x) => x.id === q) || state.models.find((x) => x.id.includes(q) || x.name.toLowerCase().includes(q));
-        if (!m) return note(`No model matches "${arg}". Try /models.`);
+        const mode = MODES.find((x) => x.id === q);
+        const m = mode ? { id: mode.model } : state.models.find((x) => x.id === q) || state.models.find((x) => x.id.includes(q) || x.name.toLowerCase().includes(q));
+        if (!m) return note(`No model matches "${arg}". Try simple, complex, or a name from /models.`);
         setModel(m.id);
         return note(`Model → ${m.id}`);
       }
-      case "models":
-        return note("Models (price per 1M tokens, in / out)\n" + state.models.map((m) => `  ${m.id.padEnd(20)} ${m.in != null ? `$${m.in} / $${m.out}` : "?"}`).join("\n"));
+      case "models": return note("Models (price per 1M tokens, in / out)\n" + state.models.map((m) => `  ${m.id.padEnd(20)} ${m.in != null ? `$${m.in} / $${m.out}` : "?"}`).join("\n"));
       case "system":
         if (!t) return;
         if (!arg) return note(`Instructions for this thread: ${t.system ? "\n" + t.system : "(default)"}`);
@@ -948,6 +1113,10 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       case "thinking":
         await saveSettings({ showThinking: arg ? /^(on|1|true|yes)$/i.test(arg) : !state.settings.showThinking });
         return note(`Reasoning summary → ${state.settings.showThinking ? "shown" : "hidden"}`);
+      case "highlight":
+        await saveSettings({ highlight: arg ? /^(on|1|true|yes)$/i.test(arg) : state.settings.highlight === false });
+        renderAll();
+        return note(`Highlights → ${state.settings.highlight === false ? "off" : "on"}`);
       case "max": {
         const n = parseInt(arg, 10);
         if (!n) return note(`Longest reply: ${state.settings.maxTokens} tokens`);
@@ -969,14 +1138,10 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         saveThread(t);
         renderTranscript();
         return;
-      case "export":
-        return threadAction(arg.toLowerCase() === "json" ? "json" : arg.toLowerCase() === "docx" || arg.toLowerCase() === "word" ? "docx" : "md");
-      case "files":
-        return openFiles();
-      case "usage":
-        return openUsage();
-      case "context":
-        return countContext();
+      case "export": return threadAction(arg.toLowerCase() === "json" ? "json" : /^(docx|word)$/i.test(arg) ? "docx" : "md");
+      case "files": return openFiles();
+      case "usage": return openUsage();
+      case "context": return countContext();
       case "budget": {
         if (!arg) return openUsage();
         const off = /^(off|none|clear|0)$/i.test(arg);
@@ -986,13 +1151,10 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         await refreshUsage();
         return note(off ? "Monthly budget cleared." : `Monthly budget → $${n}`);
       }
-      case "logout":
-        return logout();
-      default:
-        return note(`Unknown command /${cmd}. Try /help.`);
+      case "logout": return logout();
+      default: return note(`Unknown command /${cmd}. Try /help.`);
     }
   }
-
   function setModel(id) {
     const t = active();
     if (t) {
@@ -1002,7 +1164,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     saveSettings({ model: id });
     renderTopbar();
   }
-
   async function countContext() {
     const t = active();
     if (!t || !t.messages.some((m) => m.role === "user")) return note("Nothing in this thread yet.");
@@ -1024,10 +1185,9 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       state.settings = await apiJson("/api/settings", { method: "PUT", body: patch });
       applyTheme();
     } catch (e) {
-      note(`Could not save settings: ${e.message}`);
+      if (e.message !== "Signed out") note(`Could not save settings: ${e.message}`);
     }
   }
-
   function applyTheme() {
     const dark = state.settings.theme === "dark";
     document.documentElement.dataset.theme = dark ? "dark" : "light";
@@ -1035,36 +1195,40 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     const d = $("#hljs-dark");
     if (l) l.disabled = dark;
     if (d) d.disabled = !dark;
+    document.body.classList.toggle("no-highlight", state.settings.highlight === false);
   }
-
   function openSettings() {
     const s = state.settings;
     $("#set-system").value = s.systemPrompt || state.legalPrompt || "";
+    const curModel = s.model || state.defaultModel;
+    fillSelect($("#set-mode"), [...MODES.map((m) => new Option(`${m.label} · ${m.desc}`, m.model)), ...(modeFor(curModel) ? [] : [new Option(`Custom · ${curModel}`, curModel)])], curModel);
     fillSelect($("#set-jurisdiction"), [new Option("none", ""), ...JURISDICTIONS.map((j) => new Option(j, j))], s.jurisdiction || "");
     $("#set-budget").value = s.monthlyBudget == null ? "" : s.monthlyBudget;
     $("#set-max").value = s.maxTokens || 16000;
     $("#set-theme").value = s.theme === "dark" ? "dark" : "light";
+    $("#set-highlight").checked = s.highlight !== false;
     $("#set-thinking").checked = s.showThinking !== false;
     $("#set-fallback").checked = s.fallbacks !== false;
     const L = state.limits;
     $("#set-limits").textContent = L.threads ? `Keeps the newest ${L.threads} threads and ${L.files} files (up to ${L.filesMb} MB); older ones are removed first in, first out.` : "";
     $("#settings-panel").classList.remove("hidden");
   }
-
   async function submitSettings() {
     const sys = $("#set-system").value.trim();
     await saveSettings({
       systemPrompt: sys && sys !== (state.legalPrompt || "").trim() ? sys : null,
+      model: $("#set-mode").value || null,
       jurisdiction: $("#set-jurisdiction").value || null,
       monthlyBudget: $("#set-budget").value === "" ? null : Number($("#set-budget").value),
       maxTokens: Number($("#set-max").value) || 16000,
       theme: $("#set-theme").value,
+      highlight: $("#set-highlight").checked,
       showThinking: $("#set-thinking").checked,
       fallbacks: $("#set-fallback").checked,
     });
     $("#settings-panel").classList.add("hidden");
     refreshUsage().catch(() => {});
-    renderTopbar();
+    renderAll();
     note("Settings saved.");
   }
 
@@ -1073,11 +1237,9 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     const u = await apiJson("/api/usage");
     state.live.budget = u.budget;
     state.live.today = u.totals.today.cost;
-    if (u.rateLimit) state.live.rateLimit = u.rateLimit;
     renderUsageChip();
     return u;
   }
-
   async function openUsage() {
     const panel = $("#usage-panel");
     panel.classList.remove("hidden");
@@ -1092,7 +1254,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         cards.appendChild(el("div", "card", `<div class="k">${label}</div><div class="v">${fmtCost(s.cost)}</div><div class="s">${fmtNum(s.requests)} replies · ${fmtNum(s.input + s.cacheRead + s.cacheWrite)} in · ${fmtNum(s.output)} out</div>`));
       }
       body.appendChild(cards);
-
       body.appendChild(el("div", "section", "Monthly budget"));
       const row = el("div", "budget-row");
       const input = el("input");
@@ -1116,13 +1277,11 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         bar.appendChild(fill);
         row.appendChild(bar);
         row.appendChild(el("span", "", `${fmtCost(u.budget.spent)} spent · <b>${fmtCost(Math.max(0, u.budget.remaining))} remaining</b> of ${fmtCost(u.budget.monthly)} in ${u.month}`));
-      } else {
-        row.appendChild(el("span", "", `No budget set. ${fmtCost(u.budget.spent)} spent in ${u.month}.`));
-      }
+      } else row.appendChild(el("span", "", `No budget set. ${fmtCost(u.budget.spent)} spent in ${u.month}.`));
       body.appendChild(row);
 
       body.appendChild(el("div", "section", "Rate limits (from the last reply)"));
-      const rl = u.rateLimit;
+      const rl = state.live.rateLimit;
       if (rl) {
         const grid = el("div", "rl");
         for (const [key, label] of [["requests", "Requests per minute"], ["tokens", "Tokens per minute"], ["input-tokens", "Input tokens per minute"], ["output-tokens", "Output tokens per minute"]]) {
@@ -1135,7 +1294,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         }
         grid.appendChild(el("div", "card", `<div class="k">Captured</div><div class="v">${fmtAgo(rl.at)}</div><div class="s">${new Date(rl.at).toLocaleTimeString()}</div>`));
         body.appendChild(grid);
-      } else body.appendChild(el("div", "fine", "No reply yet. Send a message to populate this."));
+      } else body.appendChild(el("div", "fine", "No reply yet in this session. Send a message to populate this."));
 
       body.appendChild(el("div", "section", "Last 30 days"));
       const spark = el("div", "spark");
@@ -1148,7 +1307,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       }
       body.appendChild(spark);
       body.appendChild(el("div", "spark-labels", `<span>${u.days[0].day}</span><span>${u.days[u.days.length - 1].day}</span>`));
-
       if (u.byModel.length) {
         body.appendChild(el("div", "section", "By model, this month"));
         const tb = el("table", "t", `<tr><th>Model</th><th class="num">Replies</th><th class="num">Input</th><th class="num">Cached</th><th class="num">Output</th><th class="num">Cost</th></tr>`);
@@ -1167,7 +1325,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     }
   }
 
-  // ------------------------------------------------------------ files panel
+  // ------------------------------------------------------------ files panel + preview
   async function openFiles() {
     const panel = $("#files-panel");
     panel.classList.remove("hidden");
@@ -1183,8 +1341,8 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         const row = el("div", "file-row");
         if (f.kind === "image") {
           const img = el("img");
-          img.src = `/api/files/${f.id}?inline=1`;
           img.alt = "";
+          fetchFile(f).then((e) => (img.src = e.url)).catch(() => {});
           row.appendChild(img);
         } else row.appendChild(el("span", "kind", f.kind));
         row.appendChild(el("span", "fname", esc(f.name)));
@@ -1196,12 +1354,11 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
           panel.classList.add("hidden");
           $("#input").focus();
         }, "small"));
-        const dl = el("a", "", "Download");
-        dl.href = `/api/files/${f.id}`;
-        row.appendChild(dl);
+        row.appendChild(btn("Download", () => downloadFile(f), "small"));
         row.appendChild(btn("Delete", async () => {
           if (!confirm(`Delete ${f.name}?`)) return;
           await apiJson(`/api/files/${f.id}`, { method: "DELETE" });
+          state.blobs.delete(f.id);
           openFiles();
         }, "small danger"));
         body.appendChild(row);
@@ -1210,39 +1367,39 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       body.textContent = "Could not load files: " + e.message;
     }
   }
-
-  // ------------------------------------------------------------ preview
   async function openPreview(f) {
     const panel = $("#preview-panel");
     panel.classList.remove("hidden");
     $("#preview-title").textContent = f.name;
-    $("#preview-dl").href = `/api/files/${f.id}`;
+    $("#preview-dl").onclick = () => downloadFile(f);
     const body = $("#preview-body");
     body.innerHTML = "";
-    if (f.kind === "image") {
-      const img = el("img", "preview-img");
-      img.src = `/api/files/${f.id}?inline=1`;
-      img.alt = f.name;
-      body.appendChild(img);
-      return;
-    }
-    if (f.kind === "pdf") {
-      const frame = el("iframe", "preview-frame");
-      frame.src = `/api/files/${f.id}?inline=1`;
-      frame.title = f.name;
-      body.appendChild(frame);
-      return;
-    }
     body.appendChild(el("div", "preview-loading", "Loading…"));
     try {
-      const p = await apiJson(`/api/files/${f.id}/preview`);
+      const file = await fetchFile(f);
       body.innerHTML = "";
-      if (p.kind === "html") {
+      if (f.kind === "image") {
+        const img = el("img", "preview-img");
+        img.src = file.url;
+        img.alt = f.name;
+        body.appendChild(img);
+      } else if (f.kind === "pdf") {
+        const frame = el("iframe", "preview-frame");
+        frame.src = file.url;
+        frame.title = f.name;
+        body.appendChild(frame);
+      } else if (f.kind === "docx") {
+        if (!window.mammoth) throw new Error("the Word reader has not loaded yet");
+        const html = (await mammoth.convertToHtml({ arrayBuffer: file.bytes.buffer.slice(file.bytes.byteOffset, file.bytes.byteOffset + file.bytes.byteLength) })).value;
         const doc = el("div", "doc-preview");
-        doc.innerHTML = window.DOMPurify ? DOMPurify.sanitize(p.html) : esc(p.html);
+        doc.innerHTML = window.DOMPurify ? DOMPurify.sanitize(html) : esc(html);
+        highlightLegal(doc);
         body.appendChild(doc);
-      } else if (p.kind === "text") body.appendChild(el("pre", "text-preview", esc(p.text)));
-      else body.appendChild(el("div", "preview-loading", "No preview for this file type."));
+      } else {
+        const pre = el("pre", "text-preview", esc(file.text != null ? file.text : new TextDecoder().decode(file.bytes)));
+        highlightLegal(pre);
+        body.appendChild(pre);
+      }
     } catch (e) {
       body.innerHTML = "";
       body.appendChild(el("div", "preview-loading", "Could not load the preview: " + esc(e.message)));
@@ -1255,31 +1412,26 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     $("#login").classList.remove("hidden");
     setTimeout(() => $("#password").focus(), 0);
   }
-
   async function logout() {
-    try {
-      await api("/api/logout", { method: "POST", body: {} });
-    } catch {
-      /* ignore */
-    }
+    setToken("");
     showLogin();
   }
-
   async function boot(me) {
     $("#login").classList.add("hidden");
     $("#app").classList.remove("hidden");
     try {
-      if (!me) me = await (await fetch("/api/me", { credentials: "same-origin" })).json();
+      if (!me) me = await (await api("/api/me")).json();
       state.legalPrompt = me.legalPrompt || "";
       state.limits = me.limits || {};
       state.defaultModel = me.defaultModel || state.defaultModel;
+      if (me.hasApiKey === false) note("The Worker has no ANTHROPIC_API_KEY secret yet, so replies will fail until it is added.");
       const [models, settings] = await Promise.all([apiJson("/api/models").catch(() => []), apiJson("/api/settings").catch(() => ({}))]);
-      state.models = models;
+      state.models = Array.isArray(models) ? models : [];
       state.settings = settings;
       applyTheme();
       await refreshIndex();
-      await migrateLegacy();
     } catch (e) {
+      if (e.message === "Signed out") return;
       note(`Could not load everything: ${e.message}`);
     }
     renderTemplates();
@@ -1297,12 +1449,10 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     t.style.height = "auto";
     t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px";
   }
-
   function userHistory() {
     const t = active();
     return t ? t.messages.filter((m) => m.role === "user").map((m) => m.text) : [];
   }
-
   function wire() {
     $("#login-form").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -1311,11 +1461,10 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       err.textContent = "";
       b.disabled = true;
       try {
-        const res = await fetch("/api/login", {
+        const res = await fetch(API + "/api/login", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Requested-With": "claude-terminal" },
-          body: JSON.stringify({ password: $("#password").value }),
-          credentials: "same-origin",
+          body: JSON.stringify({ key: $("#password").value }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -1332,10 +1481,11 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
           }
           return;
         }
+        setToken(data.token);
         $("#password").value = "";
         boot();
       } catch (e2) {
-        err.textContent = e2.message;
+        err.textContent = `Could not reach the server (${e2.message}).`;
       } finally {
         b.disabled = false;
       }
@@ -1380,7 +1530,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         uploadFiles(files);
       }
     });
-
     $("#stop").addEventListener("click", stopStreaming);
     $("#attach").addEventListener("click", () => $("#file").click());
     $("#files-upload").addEventListener("click", () => {
@@ -1396,7 +1545,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       await uploadFiles(files, { attach: mode !== "store" });
       if (mode === "store") openFiles();
     });
-
     $("#new-thread").addEventListener("click", () => newThread());
     $("#logout").addEventListener("click", logout);
     $("#usage-btn").addEventListener("click", openUsage);
@@ -1430,9 +1578,15 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     document.addEventListener("click", (e) => {
       if (!e.target.closest("#thread-menu")) $("#thread-menu").classList.add("hidden");
     });
-
     $("#model").addEventListener("change", (e) => setModel(e.target.value));
-    $("#effort").addEventListener("change", (e) => saveSettings({ effort: e.target.value || null }));
+    $("#effort").addEventListener("change", async (e) => {
+      await saveSettings({ effort: e.target.value || null });
+      renderEffortOptions();
+    });
+    $("#highlight").addEventListener("change", async (e) => {
+      await saveSettings({ highlight: e.target.checked });
+      renderTranscript();
+    });
     $("#jurisdiction").addEventListener("change", (e) => {
       const t = active();
       const v = e.target.value || null;
@@ -1443,7 +1597,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       }
       saveSettings({ jurisdiction: v });
     });
-
     for (const b of $$("[data-close]")) b.addEventListener("click", () => $("#" + b.dataset.close).classList.add("hidden"));
     for (const m of $$(".modal")) m.addEventListener("click", (e) => {
       if (e.target === m) m.classList.add("hidden");
@@ -1454,7 +1607,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         $("#thread-menu").classList.add("hidden");
       }
     });
-
     let dragDepth = 0;
     document.addEventListener("dragenter", (e) => {
       if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes("Files")) return;
@@ -1473,14 +1625,11 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       const files = Array.from(e.dataTransfer ? e.dataTransfer.files : []);
       if (files.length && !$("#app").classList.contains("hidden")) uploadFiles(files);
     });
-
     window.addEventListener("beforeunload", (e) => {
-      if (state.streaming || state.saveTimers.size) {
-        for (const t of state.loaded.values()) if (state.saveTimers.has(t.id)) saveThread(t, true);
-        if (state.streaming) {
-          e.preventDefault();
-          e.returnValue = "";
-        }
+      for (const t of state.loaded.values()) if (state.saveTimers.has(t.id)) saveThread(t, true);
+      if (state.streaming) {
+        e.preventDefault();
+        e.returnValue = "";
       }
     });
   }
@@ -1488,8 +1637,18 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
   // ------------------------------------------------------------ start
   loadPrefs();
   wire();
-  fetch("/api/me", { credentials: "same-origin" })
-    .then((r) => r.json())
-    .then((me) => (me.authed ? boot(me) : showLogin()))
-    .catch(() => showLogin());
+  (async () => {
+    try {
+      if (!getToken()) return showLogin();
+      const res = await fetch(API + "/api/me", { headers: { Authorization: `Bearer ${getToken()}`, "X-Requested-With": "claude-terminal" } });
+      const me = await res.json();
+      if (me.authed) boot(me);
+      else {
+        setToken("");
+        showLogin();
+      }
+    } catch {
+      showLogin();
+    }
+  })();
 })();

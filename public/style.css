@@ -163,6 +163,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 }
 .ctl { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); }
 .ctl select { max-width: 180px; }
+.speed { font-size: 12px; color: var(--fg-faint); white-space: nowrap; }
+.speed.fast { color: var(--ok); }
+.speed.slow { color: var(--warn); }
+.speed.very-slow { color: var(--err); }
 .chip {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
   padding: 4px 12px; font-size: 12.5px; color: var(--fg-dim);
@@ -389,6 +393,29 @@ table.t td.num, table.t th.num { text-align: right; font-variant-numeric: tabula
 .file-row img { width: 34px; height: 34px; object-fit: cover; border-radius: 6px; }
 .file-row .kind { color: var(--fg-faint); width: 44px; font-size: 11px; text-transform: uppercase; }
 .file-row a { color: var(--accent); text-decoration: none; font-size: 13px; }
+
+/* ---------- legal highlighting */
+.lg { border-radius: 3px; padding: 0 2px; }
+.lg-case { font-style: italic; color: var(--accent); }
+.lg-cite { background: #e3edfb; color: #163a6b; }
+.lg-stat { background: #efe6fb; color: #4b2a7a; }
+.lg-date { background: #fdf0d5; color: #6b4a00; }
+.lg-deadline { background: #fde2e1; color: #8a1f17; font-weight: 600; }
+.lg-period { background: #fff7e0; color: #6b4a00; }
+.lg-money { background: #e1f5e8; color: #14532d; }
+.lg-term { background: #dff4f2; color: #0f4f4a; }
+.lg-party { background: #e8ecf1; color: #22303f; font-weight: 600; }
+.lg-oblig { text-decoration: underline dotted var(--fg-dim); text-underline-offset: 2px; }
+[data-theme="dark"] .lg-cite { background: rgba(122, 162, 214, .22); color: #b7d0f3; }
+[data-theme="dark"] .lg-stat { background: rgba(170, 130, 230, .22); color: #d6c2f5; }
+[data-theme="dark"] .lg-date { background: rgba(240, 190, 80, .2); color: #f3d58a; }
+[data-theme="dark"] .lg-deadline { background: rgba(255, 110, 100, .25); color: #ffb3ad; }
+[data-theme="dark"] .lg-period { background: rgba(240, 190, 80, .14); color: #e9cd8c; }
+[data-theme="dark"] .lg-money { background: rgba(80, 200, 120, .2); color: #a9e8c0; }
+[data-theme="dark"] .lg-term { background: rgba(70, 190, 180, .2); color: #a4e6df; }
+[data-theme="dark"] .lg-party { background: rgba(170, 185, 205, .18); color: #d6dee8; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 0 0 14px 26px; font-size: 12.5px; }
+.no-highlight .lg { background: none !important; color: inherit !important; font-weight: inherit !important; font-style: inherit !important; text-decoration: none !important; }
 
 /* ---------- print */
 @media print {

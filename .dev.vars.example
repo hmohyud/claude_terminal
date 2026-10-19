@@ -1,0 +1,4 @@
+# Local development only (wrangler dev). Copy to .dev.vars and fill in.
+# In production these are GitHub Actions secrets, not files.
+ACCESS_KEY=choose-a-long-random-key
+ANTHROPIC_API_KEY=sk-ant-...

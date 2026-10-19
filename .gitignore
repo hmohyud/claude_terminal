@@ -1,5 +1,7 @@
 node_modules/
+.dev.vars
 .env
+.wrangler/
+data/
 *.log
 .DS_Store
-data/
