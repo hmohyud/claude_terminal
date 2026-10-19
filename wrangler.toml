@@ -23,7 +23,7 @@ MAX_FILES_MB = "1024"
 # and fills in the id; any value works for local development.
 [[kv_namespaces]]
 binding = "KV"
-id = "__KV_ID__"
+id = "188ce8906ab5431f8f636ed32715db0a"
 
 # Login attempts per IP per minute.
 [[ratelimits]]
