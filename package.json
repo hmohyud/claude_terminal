@@ -1,0 +1,19 @@
+{
+  "name": "claude-terminal",
+  "version": "1.0.0",
+  "description": "Password-gated web terminal for the Anthropic API",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "express": "^5.3.0"
+  }
+}
