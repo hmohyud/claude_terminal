@@ -5,6 +5,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import mammoth from "mammoth";
+import { marked } from "marked";
+import {
+  AlignmentType, Document, ExternalHyperlink, HeadingLevel, LevelFormat, Packer, Paragraph, ShadingType,
+  Table, TableCell, TableRow, TextRun, WidthType,
+} from "docx";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.join(here, ".env");
@@ -28,12 +33,19 @@ const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const LEDGER_PATH = path.join(DATA_DIR, "usage.jsonl");
 const SETTINGS_PATH = path.join(DATA_DIR, "settings.json");
 const FILE_INDEX_PATH = path.join(DATA_DIR, "files.json");
+const THREAD_DIR = path.join(DATA_DIR, "threads");
+// Storage caps. Everything is first in, first out: when a cap is exceeded the
+// oldest thread or file is removed to make room.
+const MAX_THREADS = Math.max(5, Number(process.env.MAX_THREADS) || 200);
+const MAX_FILES = Math.max(5, Number(process.env.MAX_FILES) || 300);
+const MAX_FILES_MB = Math.max(10, Number(process.env.MAX_FILES_MB) || 1024);
 
 if (!process.env.ANTHROPIC_API_KEY) fatal("ANTHROPIC_API_KEY is missing. Copy .env.example to .env and fill it in.");
 if (!PASSWORD || PASSWORD === "change-me") fatal("TERMINAL_PASSWORD is missing. Set it in .env.");
 if (PASSWORD.length < 8) fatal("TERMINAL_PASSWORD must be at least 8 characters.");
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(THREAD_DIR, { recursive: true });
 
 // SESSION_SECRET can come from the environment; otherwise it is generated once
 // and kept in DATA_DIR so logins survive restarts and container rebuilds.
@@ -70,8 +82,34 @@ function writeJson(file, value) {
   fs.renameSync(tmp, file);
 }
 
-const settings = readJson(SETTINGS_PATH, {});
-if (settings.monthlyBudget === undefined) settings.monthlyBudget = Number(process.env.MONTHLY_BUDGET_USD) || null;
+// Built-in instructions for legal work. Users can edit or replace them in
+// settings; the client appends the jurisdiction and today's date.
+const LEGAL_SYSTEM_PROMPT = `You are a careful legal research and drafting assistant for someone working on United States legal matters.
+
+How to work:
+- When the jurisdiction matters and is not stated, ask; otherwise use the default jurisdiction given below. Distinguish federal law from state law and say where states differ.
+- Cite authority precisely: case name, reporter citation, court and year; statute title and section; rule number. Never invent or guess a citation. If you are not confident a citation is real and says what you claim, say so plainly and describe the authority in general terms instead.
+- Flag anything that may have changed after your knowledge cutoff, and anything that turns on facts you do not have.
+- Separate what the law says from how it likely applies to the facts, and give your level of confidence. For analysis questions use a clear structure such as Issue, Rule, Analysis, Conclusion; for simple questions answer in plain prose.
+- When documents are attached, rely on their exact text, quote the relevant language, and say where it appears.
+- Be direct and concise. Use headings and lists only where they help. Write drafts in a professional register that is ready to edit.
+- You assist a person who makes the decisions. Note when something warrants review by a licensed attorney in the relevant jurisdiction, but do not pad answers with repeated disclaimers.`;
+
+const SETTING_DEFAULTS = {
+  monthlyBudget: null,
+  model: null, // null = DEFAULT_MODEL
+  effort: "high",
+  showThinking: true,
+  maxTokens: 16000,
+  fallbacks: true,
+  theme: "light",
+  jurisdiction: "Federal (U.S.)",
+  systemPrompt: null, // null = LEGAL_SYSTEM_PROMPT
+};
+const settings = { ...SETTING_DEFAULTS, ...readJson(SETTINGS_PATH, {}) };
+if (settings.monthlyBudget === undefined || settings.monthlyBudget === null) {
+  settings.monthlyBudget = Number(process.env.MONTHLY_BUDGET_USD) || null;
+}
 
 // ---------------------------------------------------------------- model catalog
 // Prices are USD per million tokens (first-party API rates). cacheRead is the
@@ -262,6 +300,29 @@ function safeName(name) {
   return String(name || "file").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 120) || "file";
 }
 
+function removeFileFromDisk(id) {
+  fs.rm(path.join(UPLOAD_DIR, id), { force: true }, () => {});
+  fs.rm(path.join(UPLOAD_DIR, id + ".txt"), { force: true }, () => {});
+}
+
+// First in, first out: drop the oldest uploads once the count or size cap is hit.
+function enforceFileCaps() {
+  const sorted = fileIndex.slice().sort((a, b) => a.ts - b.ts);
+  let total = sorted.reduce((s, f) => s + (f.size || 0), 0);
+  const removed = [];
+  while (sorted.length && (sorted.length > MAX_FILES || total > MAX_FILES_MB * 1048576)) {
+    const f = sorted.shift();
+    total -= f.size || 0;
+    removed.push(f);
+  }
+  if (!removed.length) return 0;
+  const gone = new Set(removed.map((f) => f.id));
+  fileIndex = fileIndex.filter((f) => !gone.has(f.id));
+  saveFileIndex();
+  for (const f of removed) removeFileFromDisk(f.id);
+  return removed.length;
+}
+
 function fileToBlock(entry) {
   const buf = fs.readFileSync(path.join(UPLOAD_DIR, entry.id));
   if (entry.kind === "image") {
@@ -410,10 +471,15 @@ app.use("/api", (req, res, next) => {
 });
 
 app.use("/api/upload", express.raw({ type: () => true, limit: "40mb" }));
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "6mb" }));
 
 app.get("/api/me", (req, res) => {
-  res.json({ authed: isAuthed(req), defaultModel: DEFAULT_MODEL });
+  res.json({
+    authed: isAuthed(req),
+    defaultModel: DEFAULT_MODEL,
+    legalPrompt: LEGAL_SYSTEM_PROMPT,
+    limits: { threads: MAX_THREADS, files: MAX_FILES, filesMb: MAX_FILES_MB },
+  });
 });
 
 app.post("/api/login", async (req, res) => {
@@ -488,6 +554,326 @@ app.get("/api/models", requireAuth, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------- settings
+function saveSettings() {
+  writeJson(SETTINGS_PATH, settings);
+}
+
+app.get("/api/settings", requireAuth, (req, res) => res.json(settings));
+
+app.put("/api/settings", requireAuth, (req, res) => {
+  const b = req.body || {};
+  const errors = [];
+  const str = (k, max) => {
+    if (b[k] === undefined) return;
+    if (b[k] === null || b[k] === "") settings[k] = null;
+    else if (typeof b[k] === "string") settings[k] = b[k].slice(0, max);
+    else errors.push(k);
+  };
+  const bool = (k) => {
+    if (b[k] !== undefined) settings[k] = !!b[k];
+  };
+  if (b.monthlyBudget !== undefined) {
+    if (b.monthlyBudget === null || b.monthlyBudget === "") settings.monthlyBudget = null;
+    else if (Number.isFinite(Number(b.monthlyBudget)) && Number(b.monthlyBudget) >= 0) settings.monthlyBudget = Number(b.monthlyBudget);
+    else errors.push("monthlyBudget");
+  }
+  if (b.maxTokens !== undefined) {
+    const n = Math.floor(Number(b.maxTokens));
+    if (Number.isFinite(n)) settings.maxTokens = Math.max(256, Math.min(128000, n));
+    else errors.push("maxTokens");
+  }
+  if (b.effort !== undefined) {
+    if (b.effort === null || b.effort === "" || ["low", "medium", "high", "xhigh", "max"].includes(b.effort)) settings.effort = b.effort || null;
+    else errors.push("effort");
+  }
+  if (b.theme !== undefined) settings.theme = b.theme === "dark" ? "dark" : "light";
+  str("model", 80);
+  str("jurisdiction", 60);
+  str("systemPrompt", 40_000);
+  bool("showThinking");
+  bool("fallbacks");
+  if (errors.length) return res.status(400).json({ error: `Invalid value for ${errors.join(", ")}` });
+  try {
+    saveSettings();
+  } catch (e) {
+    return res.status(500).json({ error: `Could not save settings: ${e.message}` });
+  }
+  res.json(settings);
+});
+
+// ---------------------------------------------------------------- threads
+// Threads are stored on the server (data/threads/<id>.json) so every browser
+// that knows the password sees the same history. First in, first out past
+// MAX_THREADS: the oldest-created thread is dropped.
+const threads = new Map();
+for (const name of fs.readdirSync(THREAD_DIR)) {
+  if (!name.endsWith(".json")) continue;
+  const t = readJson(path.join(THREAD_DIR, name), null);
+  if (t && typeof t === "object" && t.id === name.slice(0, -5)) threads.set(t.id, t);
+}
+const THREAD_ID = /^[a-z0-9]{6,24}$/;
+
+function threadSummary(t) {
+  return {
+    id: t.id,
+    title: t.title || "Untitled",
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+    cost: t.cost || 0,
+    count: (t.messages || []).filter((m) => m.role !== "note").length,
+    jurisdiction: t.jurisdiction || null,
+    model: t.model || null,
+  };
+}
+
+function enforceThreadCap() {
+  if (threads.size <= MAX_THREADS) return;
+  const ordered = [...threads.values()].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  while (threads.size > MAX_THREADS && ordered.length) {
+    const t = ordered.shift();
+    threads.delete(t.id);
+    fs.rm(path.join(THREAD_DIR, t.id + ".json"), { force: true }, () => {});
+  }
+}
+
+function cleanThread(id, b) {
+  if (!b || typeof b !== "object") return { error: "Bad thread body" };
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const s = (v, max, d = "") => (typeof v === "string" ? v.slice(0, max) : d);
+  if (!Array.isArray(b.messages) || b.messages.length > 2000) return { error: "Bad messages" };
+  const messages = [];
+  for (const m of b.messages) {
+    if (!m || !["user", "assistant", "note"].includes(m.role)) return { error: "Bad message role" };
+    const files = [];
+    for (const f of Array.isArray(m.files) ? m.files : []) {
+      if (!f || !/^[a-f0-9]{24}$/.test(String(f.id))) continue;
+      files.push({ id: f.id, name: s(f.name, 120, "file"), kind: s(f.kind, 10), mime: s(f.mime, 100), size: num(f.size, 0) });
+    }
+    const meta = m.meta && typeof m.meta === "object" ? m.meta : {};
+    messages.push({
+      id: s(m.id, 24, crypto.randomBytes(6).toString("hex")),
+      role: m.role,
+      text: s(m.text, MAX_TEXT),
+      thinking: s(m.thinking, 200_000),
+      files,
+      ts: num(m.ts, Date.now()),
+      meta: {
+        model: s(meta.model, 80),
+        usage: meta.usage && typeof meta.usage === "object" ? pickUsage(meta.usage) : undefined,
+        cost: meta.cost == null ? undefined : num(meta.cost, 0),
+        ms: meta.ms == null ? undefined : num(meta.ms, 0),
+        stop_reason: s(meta.stop_reason, 40) || undefined,
+        error: s(meta.error, 2000) || undefined,
+        fallback: s(meta.fallback, 200) || undefined,
+        stopped: meta.stopped ? true : undefined,
+      },
+    });
+  }
+  return {
+    thread: {
+      id,
+      title: s(b.title, 120, "Untitled"),
+      createdAt: num(b.createdAt, Date.now()),
+      updatedAt: Date.now(),
+      model: s(b.model, 80) || null,
+      system: s(b.system, 40_000),
+      jurisdiction: s(b.jurisdiction, 60) || null,
+      messages,
+      cost: num(b.cost, 0),
+      tokens: { in: num(b.tokens && b.tokens.in, 0), out: num(b.tokens && b.tokens.out, 0) },
+    },
+  };
+}
+
+app.get("/api/threads", requireAuth, (req, res) => {
+  res.json({
+    threads: [...threads.values()].map(threadSummary).sort((a, b) => b.updatedAt - a.updatedAt),
+    limit: MAX_THREADS,
+  });
+});
+
+app.get("/api/threads/:id", requireAuth, (req, res) => {
+  const t = THREAD_ID.test(req.params.id) && threads.get(req.params.id);
+  if (!t) return res.status(404).json({ error: "No such thread" });
+  res.json(t);
+});
+
+app.put("/api/threads/:id", requireAuth, (req, res) => {
+  const id = req.params.id;
+  if (!THREAD_ID.test(id)) return res.status(400).json({ error: "Bad thread id" });
+  const r = cleanThread(id, req.body);
+  if (r.error) return res.status(400).json({ error: r.error });
+  const existing = threads.get(id);
+  if (existing) r.thread.createdAt = existing.createdAt || r.thread.createdAt;
+  try {
+    writeJson(path.join(THREAD_DIR, id + ".json"), r.thread);
+  } catch (e) {
+    return res.status(500).json({ error: `Could not save thread: ${e.message}` });
+  }
+  threads.set(id, r.thread);
+  enforceThreadCap();
+  res.json(threadSummary(r.thread));
+});
+
+app.delete("/api/threads/:id", requireAuth, (req, res) => {
+  const id = req.params.id;
+  if (!THREAD_ID.test(id) || !threads.has(id)) return res.status(404).json({ error: "No such thread" });
+  threads.delete(id);
+  fs.rm(path.join(THREAD_DIR, id + ".json"), { force: true }, () => {});
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- Word export
+const HEADINGS = [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3, HeadingLevel.HEADING_4, HeadingLevel.HEADING_5, HeadingLevel.HEADING_6];
+
+function inlineRuns(tokens, style = {}) {
+  const runs = [];
+  for (const t of tokens || []) {
+    switch (t.type) {
+      case "strong":
+        runs.push(...inlineRuns(t.tokens, { ...style, bold: true }));
+        break;
+      case "em":
+        runs.push(...inlineRuns(t.tokens, { ...style, italics: true }));
+        break;
+      case "del":
+        runs.push(...inlineRuns(t.tokens, { ...style, strike: true }));
+        break;
+      case "codespan":
+        runs.push(new TextRun({ text: t.text, font: "Consolas", ...style }));
+        break;
+      case "br":
+        runs.push(new TextRun({ text: "", break: 1 }));
+        break;
+      case "link":
+        runs.push(new ExternalHyperlink({ link: t.href, children: inlineRuns(t.tokens, { ...style, style: "Hyperlink" }) }));
+        break;
+      case "image":
+        runs.push(new TextRun({ text: `[image: ${t.text || t.href}]`, italics: true, ...style }));
+        break;
+      default:
+        if (t.tokens && t.tokens.length) runs.push(...inlineRuns(t.tokens, style));
+        else if (typeof t.text === "string") runs.push(new TextRun({ text: t.text, ...style }));
+    }
+  }
+  return runs;
+}
+
+function markdownToDocx(markdown, title) {
+  const numberings = [];
+  const newNumbering = (start) => {
+    const reference = `num-${numberings.length + 1}`;
+    numberings.push({
+      reference,
+      levels: [0, 1, 2, 3].map((level) => ({
+        level,
+        format: LevelFormat.DECIMAL,
+        text: `%${level + 1}.`,
+        alignment: AlignmentType.START,
+        start: level === 0 ? Math.max(1, Number(start) || 1) : 1,
+        style: { paragraph: { indent: { left: 720 * (level + 1), hanging: 360 } } },
+      })),
+    });
+    return reference;
+  };
+  const indentOf = (depth) => (depth ? { left: 720 * depth } : undefined);
+
+  function listItem(item, ref, level, depth) {
+    const out = [];
+    for (const sub of item.tokens || []) {
+      if (sub.type === "list") {
+        const subRef = sub.ordered ? newNumbering(sub.start) : null;
+        for (const it of sub.items) out.push(...listItem(it, subRef, level + 1, depth));
+        continue;
+      }
+      const runs = inlineRuns(sub.tokens && sub.tokens.length ? sub.tokens : [{ type: "text", text: sub.text || sub.raw || "" }]);
+      out.push(new Paragraph({ children: runs, ...(ref ? { numbering: { reference: ref, level } } : { bullet: { level } }), spacing: { after: 60 } }));
+    }
+    return out;
+  }
+
+  function blocks(tokens, depth = 0) {
+    const out = [];
+    for (const t of tokens) {
+      switch (t.type) {
+        case "heading":
+          out.push(new Paragraph({ heading: HEADINGS[Math.min(Math.max(t.depth, 1), 6) - 1], children: inlineRuns(t.tokens), indent: indentOf(depth) }));
+          break;
+        case "paragraph":
+        case "text":
+          out.push(new Paragraph({ children: inlineRuns(t.tokens && t.tokens.length ? t.tokens : [{ type: "text", text: t.text || "" }]), spacing: { after: 160 }, indent: indentOf(depth) }));
+          break;
+        case "list": {
+          const ref = t.ordered ? newNumbering(t.start) : null;
+          for (const item of t.items) out.push(...listItem(item, ref, 0, depth));
+          out.push(new Paragraph({ text: "", spacing: { after: 60 } }));
+          break;
+        }
+        case "blockquote":
+          out.push(...blocks(t.tokens, depth + 1));
+          break;
+        case "code":
+          for (const line of String(t.text).split("\n")) {
+            out.push(new Paragraph({ children: [new TextRun({ text: line, font: "Consolas", size: 18 })], shading: { type: ShadingType.CLEAR, fill: "F2F2F2" }, spacing: { after: 0 }, indent: indentOf(depth) }));
+          }
+          out.push(new Paragraph({ text: "", spacing: { after: 120 } }));
+          break;
+        case "hr":
+          out.push(new Paragraph({ thematicBreak: true }));
+          break;
+        case "table": {
+          const row = (cells, header) =>
+            new TableRow({
+              tableHeader: header,
+              children: cells.map(
+                (c) =>
+                  new TableCell({
+                    children: [new Paragraph({ children: inlineRuns(c.tokens, header ? { bold: true } : {}) })],
+                    shading: header ? { type: ShadingType.CLEAR, fill: "E8EEF5" } : undefined,
+                  }),
+              ),
+            });
+          out.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [row(t.header, true), ...t.rows.map((r) => row(r, false))] }));
+          out.push(new Paragraph({ text: "", spacing: { after: 120 } }));
+          break;
+        }
+        case "html":
+          out.push(new Paragraph({ text: String(t.text || ""), indent: indentOf(depth) }));
+          break;
+        default:
+          break;
+      }
+    }
+    return out;
+  }
+
+  const body = blocks(marked.lexer(markdown));
+  if (!numberings.length) newNumbering(1);
+  const doc = new Document({
+    creator: "claude terminal",
+    title: title || "Document",
+    numbering: { config: numberings },
+    styles: { default: { document: { run: { font: "Calibri", size: 22 } } } },
+    sections: [{ children: [...(title ? [new Paragraph({ text: title, heading: HeadingLevel.TITLE })] : []), ...body] }],
+  });
+  return Packer.toBuffer(doc);
+}
+
+app.post("/api/export/docx", requireAuth, async (req, res) => {
+  const { title, markdown } = req.body || {};
+  if (typeof markdown !== "string" || !markdown.trim()) return res.status(400).json({ error: "Nothing to export" });
+  const name = safeName(String(title || "document").replace(/\.docx$/i, "")).slice(0, 80) + ".docx";
+  try {
+    const buf = await markdownToDocx(markdown.slice(0, MAX_TEXT), typeof title === "string" ? title.slice(0, 200) : "");
+    res.setHeader("Content-Type", DOCX_MIME);
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: `Could not build the Word file: ${e.message}` });
+  }
+});
+
 // ---------------------------------------------------------------- usage + budget
 app.get("/api/usage", requireAuth, (req, res) => res.json(usageReport()));
 
@@ -500,7 +886,7 @@ app.post("/api/budget", requireAuth, (req, res) => {
     settings.monthlyBudget = n;
   }
   try {
-    writeJson(SETTINGS_PATH, settings);
+    saveSettings();
   } catch (e) {
     return res.status(500).json({ error: `Could not save settings: ${e.message}` });
   }
@@ -509,7 +895,12 @@ app.post("/api/budget", requireAuth, (req, res) => {
 
 // ---------------------------------------------------------------- files
 app.get("/api/files", requireAuth, (req, res) => {
-  res.json(fileIndex.slice().sort((a, b) => b.ts - a.ts));
+  res.json({
+    files: fileIndex.slice().sort((a, b) => b.ts - a.ts),
+    limit: MAX_FILES,
+    limitMb: MAX_FILES_MB,
+    usedBytes: fileIndex.reduce((s, f) => s + (f.size || 0), 0),
+  });
 });
 
 app.post("/api/upload", requireAuth, async (req, res) => {
@@ -555,7 +946,8 @@ app.post("/api/upload", requireAuth, async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: `Could not store file: ${e.message}` });
   }
-  res.json(entry);
+  const evicted = enforceFileCaps();
+  res.json({ ...entry, evicted });
 });
 
 function findFile(id) {
@@ -600,8 +992,7 @@ app.delete("/api/files/:id", requireAuth, (req, res) => {
   if (!f) return res.status(404).json({ error: "No such file" });
   fileIndex = fileIndex.filter((x) => x.id !== f.id);
   saveFileIndex();
-  fs.rm(path.join(UPLOAD_DIR, f.id), { force: true }, () => {});
-  fs.rm(path.join(UPLOAD_DIR, f.id + ".txt"), { force: true }, () => {});
+  removeFileFromDisk(f.id);
   res.json({ ok: true });
 });
 

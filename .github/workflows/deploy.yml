@@ -9,9 +9,14 @@
 #   DEPLOY_PORT      optional, SSH port, default 22
 #   DEPLOY_PATH      optional, directory on the server, default ~/claude-terminal
 #
-# The server needs Docker with the compose plugin, and a .env file inside
-# DEPLOY_PATH (copy .env.example and fill it in). That .env is never
-# overwritten by a deploy.
+# Optional, to manage the app's own settings from GitHub instead of a .env
+# file on the server (if TERMINAL_PASSWORD is set, every deploy rewrites the
+# server's .env from these):
+#   ANTHROPIC_API_KEY   your API key
+#   TERMINAL_PASSWORD   the password that unlocks the terminal
+#   DOMAIN              optional, a domain pointing at the server = automatic HTTPS
+#
+# The server needs Docker with the compose plugin.
 name: deploy
 
 on:
@@ -30,8 +35,8 @@ jobs:
     outputs:
       has_target: ${{ steps.target.outputs.has_target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -57,7 +62,7 @@ jobs:
       DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '~/claude-terminal' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up SSH
         env:
@@ -85,12 +90,51 @@ jobs:
             --exclude data --exclude .env --exclude test \
             ./ "deploy:$DEPLOY_PATH/"
 
+      - name: Write the server's .env from GitHub secrets (only when TERMINAL_PASSWORD is set)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TERMINAL_PASSWORD: ${{ secrets.TERMINAL_PASSWORD }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          if [ -z "$TERMINAL_PASSWORD" ]; then
+            echo "TERMINAL_PASSWORD secret is not set; keeping the .env that is already on the server."
+            exit 0
+          fi
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::TERMINAL_PASSWORD is set but ANTHROPIC_API_KEY is not. Add both secrets."
+            exit 1
+          fi
+          if [ "${#TERMINAL_PASSWORD}" -lt 8 ]; then
+            echo "::error::TERMINAL_PASSWORD must be at least 8 characters."
+            exit 1
+          fi
+          {
+            echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+            echo "TERMINAL_PASSWORD=$TERMINAL_PASSWORD"
+            echo "SESSION_DAYS=30"
+            echo "PORT=3123"
+            if [ -n "$DOMAIN" ]; then
+              echo "BIND_ADDR=127.0.0.1"
+              echo "DOMAIN=$DOMAIN"
+              echo "COMPOSE_PROFILES=https"
+              echo "COOKIE_SECURE=1"
+              echo "TRUST_PROXY=1"
+            else
+              echo "BIND_ADDR=0.0.0.0"
+              echo "COOKIE_SECURE=0"
+            fi
+          } > env.tmp
+          scp -q env.tmp "deploy:$DEPLOY_PATH/.env.new"
+          ssh deploy "chmod 600 $DEPLOY_PATH/.env.new && mv $DEPLOY_PATH/.env.new $DEPLOY_PATH/.env"
+          rm -f env.tmp
+          echo "Wrote .env on the server from GitHub secrets."
+
       - name: Build and restart
         run: |
           ssh deploy "set -e
             cd $DEPLOY_PATH
             if [ ! -f .env ]; then
-              echo '::error::No .env on the server. Create $DEPLOY_PATH/.env from .env.example first.'
+              echo '::error::No .env on the server. Either add the ANTHROPIC_API_KEY and TERMINAL_PASSWORD secrets in GitHub, or create $DEPLOY_PATH/.env on the server (deploy/server-setup.sh does this).'
               exit 1
             fi
             docker compose up -d --build --remove-orphans

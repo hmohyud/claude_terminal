@@ -24,6 +24,7 @@ const server = spawn(process.execPath, ["server.js"], {
     HOST: "127.0.0.1",
     PORT: String(PORT),
     DATA_DIR: dataDir,
+    MAX_THREADS: "5",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -84,6 +85,42 @@ try {
 
   const bad = await fetch(`${base}/api/chat`, { method: "POST", headers: { ...H, Cookie: session }, body: JSON.stringify({ messages: [] }) });
   check("chat validates its input", bad.status === 400, `status ${bad.status}`);
+
+  // threads: save, list, read back, delete, and first-in-first-out eviction
+  const auth = { ...H, Cookie: session };
+  const mk = (id, createdAt) => ({ id, title: `Thread ${id}`, createdAt, messages: [{ id: "m1", role: "user", text: "hello " + id, files: [], ts: createdAt }], cost: 0, tokens: { in: 0, out: 0 } });
+  const put = await fetch(`${base}/api/threads/smoke01`, { method: "PUT", headers: auth, body: JSON.stringify(mk("smoke01", 1000)) });
+  check("thread saves", put.status === 200, `status ${put.status}`);
+  const got = await (await fetch(`${base}/api/threads/smoke01`, { headers: { Cookie: session } })).json();
+  check("thread round-trips", got.title === "Thread smoke01" && got.messages.length === 1 && got.messages[0].text === "hello smoke01");
+  const badId = await fetch(`${base}/api/threads/BAD$ID`, { method: "PUT", headers: auth, body: JSON.stringify(mk("x", 1)) });
+  check("thread rejects a bad id", badId.status === 400, `status ${badId.status}`);
+  for (let i = 2; i <= 6; i++) await fetch(`${base}/api/threads/smoke0${i}`, { method: "PUT", headers: auth, body: JSON.stringify(mk(`smoke0${i}`, 1000 * i)) });
+  const list = await (await fetch(`${base}/api/threads`, { headers: { Cookie: session } })).json();
+  const ids = list.threads.map((t) => t.id);
+  check("oldest thread is evicted past the cap (FIFO)", ids.length === 5 && !ids.includes("smoke01") && ids.includes("smoke06"), ids.join(","));
+  const del = await fetch(`${base}/api/threads/smoke06`, { method: "DELETE", headers: auth });
+  check("thread deletes", del.status === 200, `status ${del.status}`);
+
+  // settings
+  const st = await fetch(`${base}/api/settings`, { method: "PUT", headers: auth, body: JSON.stringify({ jurisdiction: "New York", effort: "medium", monthlyBudget: 12 }) });
+  const stj = await st.json();
+  check("settings save", st.status === 200 && stj.jurisdiction === "New York" && stj.effort === "medium" && stj.monthlyBudget === 12, JSON.stringify(stj));
+  const stBad = await fetch(`${base}/api/settings`, { method: "PUT", headers: auth, body: JSON.stringify({ effort: "bananas" }) });
+  check("settings reject a bad effort", stBad.status === 400, `status ${stBad.status}`);
+
+  // Word export
+  const md = "# Memo\n\nSome **bold** text with a [link](https://example.com).\n\n- one\n- two\n\n1. first\n2. second\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted\n\n```\ncode line\n```\n";
+  const docx = await fetch(`${base}/api/export/docx`, { method: "POST", headers: auth, body: JSON.stringify({ title: "Smoke memo", markdown: md }) });
+  const bytes = Buffer.from(await docx.arrayBuffer());
+  check("Word export returns a .docx", docx.status === 200 && bytes[0] === 0x50 && bytes[1] === 0x4b, `status ${docx.status}`);
+  try {
+    const mammoth = (await import("mammoth")).default;
+    const text = (await mammoth.extractRawText({ buffer: bytes })).value;
+    check("Word export contains the text", /Smoke memo/.test(text) && /bold/.test(text) && /second/.test(text) && /code line/.test(text), text.slice(0, 200));
+  } catch (e) {
+    check("Word export readable by mammoth", false, e.message);
+  }
 
   const forged = await fetch(`${base}/api/usage`, { headers: { Cookie: "ct_session=9999999999999.abc.forged" } });
   check("forged cookie is rejected", forged.status === 401, `status ${forged.status}`);

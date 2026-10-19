@@ -1,90 +1,145 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
 <title>claude terminal</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b0e14'/%3E%3Ctext x='7' y='23' font-family='monospace' font-size='18' fill='%237ee787'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a5f'/%3E%3Ctext x='9' y='23' font-family='Georgia,serif' font-size='19' fill='%23ffffff'%3E%C2%A7%3C/text%3E%3C/svg%3E">
+<link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <div id="login" class="screen hidden">
   <form id="login-form" class="login-box" autocomplete="off">
-    <div class="login-title"><span class="accent">❯</span> claude terminal</div>
-    <div class="login-sub">enter the password to unlock this terminal</div>
-    <input id="password" type="password" placeholder="password" autocomplete="current-password" required>
-    <button type="submit" id="login-btn">unlock</button>
+    <div class="login-title"><span class="mark">§</span> claude terminal</div>
+    <div class="login-sub">Legal research and drafting with Claude, on your own API key.</div>
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit" id="login-btn" class="primary">Unlock</button>
     <div id="login-error" class="login-error" role="alert"></div>
-    <div class="login-fine">you stay signed in on this browser for 30 days</div>
+    <div class="login-fine">This browser stays signed in for 30 days.</div>
   </form>
 </div>
 
 <div id="app" class="screen hidden">
   <aside id="sidebar">
     <div class="side-head">
-      <button id="new-conv" class="wide">+ new chat</button>
+      <div class="brand"><span class="mark">§</span> claude terminal</div>
+      <button id="new-thread" class="primary wide">New thread</button>
     </div>
-    <div id="conv-list"></div>
+    <div id="thread-list"></div>
     <div class="side-foot">
-      <button id="files-btn" class="ghost">files</button>
-      <button id="usage-btn" class="ghost">usage</button>
-      <button id="logout" class="ghost">logout</button>
+      <button id="files-btn" class="ghost">Files</button>
+      <button id="usage-btn" class="ghost">Usage</button>
+      <button id="settings-btn" class="ghost">Settings</button>
+      <button id="logout" class="ghost">Log out</button>
     </div>
   </aside>
 
   <main id="main">
     <header id="topbar">
-      <button id="toggle-sidebar" class="icon" title="toggle sidebar">☰</button>
-      <span id="conv-title" class="title" title="double-click to rename">new chat</span>
+      <button id="toggle-sidebar" class="icon" title="Show or hide the thread list">☰</button>
+      <div class="title-wrap">
+        <span id="thread-title" class="title" title="Click to rename">New thread</span>
+        <button id="thread-menu-btn" class="icon subtle" title="Thread actions">⋯</button>
+      </div>
       <span class="spacer"></span>
-      <label class="ctl">model <select id="model"></select></label>
-      <label class="ctl">effort <select id="effort"></select></label>
-      <label class="ctl check"><input type="checkbox" id="thinking"> thinking</label>
-      <button id="usage-chip" class="chip" title="usage and remaining budget">usage</button>
+      <label class="ctl">Jurisdiction <select id="jurisdiction"></select></label>
+      <label class="ctl">Model <select id="model"></select></label>
+      <label class="ctl">Effort <select id="effort"></select></label>
+      <button id="usage-chip" class="chip" title="Usage and remaining budget">usage</button>
     </header>
+    <div id="thread-menu" class="menu hidden">
+      <button data-act="rename">Rename</button>
+      <button data-act="instructions">Instructions for this thread…</button>
+      <button data-act="docx">Download as Word</button>
+      <button data-act="md">Download as Markdown</button>
+      <button data-act="json">Download as JSON</button>
+      <button data-act="print">Print</button>
+      <button data-act="clear">Clear messages</button>
+      <button data-act="delete" class="danger">Delete thread</button>
+    </div>
 
     <div id="transcript" tabindex="-1"></div>
 
     <form id="composer">
       <div id="attachments" class="hidden"></div>
+      <div id="templates" class="templates"></div>
       <div class="row">
-        <span class="prompt">❯</span>
-        <textarea id="input" rows="1" placeholder="message claude…  (/help for commands, drop files anywhere)" spellcheck="false"></textarea>
-        <button type="button" id="attach" class="icon" title="attach files">⎙</button>
-        <button type="submit" id="send" class="icon" title="send (Enter)">⏎</button>
-        <button type="button" id="stop" class="icon hidden" title="stop (Esc)">■</button>
+        <textarea id="input" rows="1" placeholder="Ask a question, or attach a document and pick a task above…" spellcheck="true"></textarea>
+        <div class="row-btns">
+          <button type="button" id="attach" title="Attach a document (or drop it anywhere)">Attach</button>
+          <button type="submit" id="send" class="primary" title="Send (Enter)">Send</button>
+          <button type="button" id="stop" class="danger hidden" title="Stop (Esc)">Stop</button>
+        </div>
       </div>
-      <div class="hint"><span id="hint-left">enter to send · shift+enter newline · ↑ history</span><span id="conv-stats"></span></div>
+      <div class="hint">
+        <span>Enter to send · Shift+Enter for a new line · drop files anywhere · <b>/help</b> for commands</span>
+        <span id="thread-stats"></span>
+      </div>
+      <div class="disclaimer">AI output can be wrong. Verify every citation, date and deadline before relying on it. This is not legal advice.</div>
       <input type="file" id="file" multiple hidden>
     </form>
   </main>
 
-  <div id="drop-overlay" class="hidden"><div>drop files to attach</div></div>
+  <div id="drop-overlay" class="hidden"><div>Drop files to attach them</div></div>
 
-  <!-- usage panel -->
+  <!-- usage -->
   <div id="usage-panel" class="modal hidden">
     <div class="modal-box">
-      <div class="modal-head"><span>usage &amp; remaining</span><button class="icon close" data-close="usage-panel">×</button></div>
-      <div id="usage-body" class="modal-body">loading…</div>
+      <div class="modal-head"><span>Usage and remaining budget</span><span class="spacer"></span><button class="icon close" data-close="usage-panel" title="Close">×</button></div>
+      <div id="usage-body" class="modal-body">Loading…</div>
     </div>
   </div>
 
   <!-- file preview -->
   <div id="preview-panel" class="modal hidden">
     <div class="modal-box wide">
-      <div class="modal-head"><span id="preview-title">preview</span><span class="spacer"></span><a id="preview-dl" class="small-link" href="#">download</a><button class="icon close" data-close="preview-panel">×</button></div>
+      <div class="modal-head"><span id="preview-title">Preview</span><span class="spacer"></span><a id="preview-dl" class="small-link" href="#">Download</a><button class="icon close" data-close="preview-panel" title="Close">×</button></div>
       <div id="preview-body" class="modal-body preview-body"></div>
     </div>
   </div>
 
-  <!-- files panel -->
+  <!-- files -->
   <div id="files-panel" class="modal hidden">
     <div class="modal-box">
-      <div class="modal-head"><span>files</span><span class="spacer"></span><button id="files-upload" class="small">upload</button><button class="icon close" data-close="files-panel">×</button></div>
-      <div id="files-body" class="modal-body">loading…</div>
+      <div class="modal-head"><span>Files</span><span id="files-cap" class="fine"></span><span class="spacer"></span><button id="files-upload" class="small">Upload</button><button class="icon close" data-close="files-panel" title="Close">×</button></div>
+      <div id="files-body" class="modal-body">Loading…</div>
+    </div>
+  </div>
+
+  <!-- thread instructions -->
+  <div id="instructions-panel" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head"><span>Instructions for this thread</span><span class="spacer"></span><button class="icon close" data-close="instructions-panel" title="Close">×</button></div>
+      <div class="modal-body">
+        <p class="fine">Replaces the default instructions for this thread only. Leave empty to use the default from Settings.</p>
+        <textarea id="thread-system" rows="10" placeholder="For example: We represent the landlord. Treat the attached lease as governing. Answer in the style of a short internal memo."></textarea>
+        <div class="modal-actions"><span class="spacer"></span><button id="thread-system-save" class="primary">Save</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- settings -->
+  <div id="settings-panel" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head"><span>Settings</span><span class="spacer"></span><button class="icon close" data-close="settings-panel" title="Close">×</button></div>
+      <div class="modal-body">
+        <label class="field">Default instructions (what Claude is told at the start of every thread)
+          <textarea id="set-system" rows="11"></textarea>
+        </label>
+        <div class="field-row"><button id="set-system-reset" class="small">Reset to the built-in legal instructions</button></div>
+        <div class="grid2">
+          <label class="field">Default jurisdiction <select id="set-jurisdiction"></select></label>
+          <label class="field">Monthly budget (USD) <input id="set-budget" type="number" min="0" step="1" placeholder="none"></label>
+          <label class="field">Longest reply (tokens) <input id="set-max" type="number" min="256" max="128000" step="1000"></label>
+          <label class="field">Appearance <select id="set-theme"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+        </div>
+        <label class="check"><input type="checkbox" id="set-thinking"> Show Claude's reasoning summary above each answer</label>
+        <label class="check"><input type="checkbox" id="set-fallback"> If a reply is refused by safety filters, automatically retry on another model</label>
+        <div class="modal-actions"><span id="set-limits" class="fine"></span><span class="spacer"></span><button id="set-save" class="primary">Save</button></div>
+      </div>
     </div>
   </div>
 </div>

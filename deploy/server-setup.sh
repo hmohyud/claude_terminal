@@ -30,11 +30,20 @@ fi
 
 # --- 2. app folder + .env ----------------------------------------------------
 mkdir -p "$APP_DIR"
+FROM_GITHUB=0
 if [ -f "$APP_DIR/.env" ]; then
   echo "keeping the existing $APP_DIR/.env"
 else
   say "settings"
-  read -rp "Anthropic API key: " API_KEY
+  echo "You can type your API key and password here, or press Enter to skip and"
+  echo "add them as GitHub secrets instead (ANTHROPIC_API_KEY and TERMINAL_PASSWORD)."
+  read -rp "Anthropic API key (Enter to skip): " API_KEY
+  if [ -z "$API_KEY" ]; then
+    FROM_GITHUB=1
+    echo "ok: the deploy will write the settings from GitHub secrets."
+  fi
+fi
+if [ "$FROM_GITHUB" = 0 ] && [ ! -f "$APP_DIR/.env" ]; then
   while :; do
     read -rsp "Password for the terminal (8+ characters): " PW; echo
     [ "${#PW}" -ge 8 ] && break
@@ -86,7 +95,7 @@ fi
 # --- 4. what to paste into GitHub -------------------------------------------
 HOST_ADDR="$(curl -fsS --max-time 5 https://api.ipify.org 2> /dev/null || hostname -I 2> /dev/null | awk '{print $1}' || hostname)"
 
-say "done. add these 4 secrets in GitHub"
+say "done. now add the secrets in GitHub"
 cat <<EOF
 Open your repo on github.com → Settings → Secrets and variables → Actions
 → "New repository secret". Create one secret per line below:
@@ -98,8 +107,18 @@ Open your repo on github.com → Settings → Secrets and variables → Actions
 
 EOF
 cat "$KEYFILE"
+if [ "$FROM_GITHUB" = 1 ]; then
+  cat <<EOF
+
+Because you skipped the API key, also add:
+
+  Name: ANTHROPIC_API_KEY   Value: your Anthropic API key
+  Name: TERMINAL_PASSWORD   Value: the password that unlocks the terminal (8+ characters)
+  Name: DOMAIN              Value: optional, a domain pointing at this server (gives you HTTPS)
+EOF
+fi
 cat <<EOF
 
 Then push to main (or open the Actions tab and run "deploy"). After the first
-deploy the terminal is at: ${URL:-see .env}
+deploy the terminal is at: ${URL:-http://$HOST_ADDR:3123, or https://your-domain if you set DOMAIN}
 EOF
