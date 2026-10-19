@@ -4,8 +4,14 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 
-const TITLE = "claude-terminal-KV";
+// Wrangler names the namespace after the binding ("KV"); older versions
+// prefixed the worker name. Accept either, and prefer the id already in
+// wrangler.toml when it still exists on the account.
+const TITLES = ["KV", "claude-terminal-KV"];
 const run = (cmd) => execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+
+const toml = fs.readFileSync("wrangler.toml", "utf8");
+const current = (toml.match(/\[\[kv_namespaces\]\][\s\S]*?\bid\s*=\s*"([a-f0-9]{32})"/) || [])[1];
 
 let list;
 try {
@@ -14,22 +20,21 @@ try {
   console.error("Could not list KV namespaces:", e.message);
   process.exit(1);
 }
-let ns = list.find((n) => n.title === TITLE);
+let ns = (current && list.find((n) => n.id === current)) || list.find((n) => TITLES.includes(n.title));
 if (!ns) {
-  console.log(`Creating KV namespace "${TITLE}"`);
+  console.log("Creating the KV namespace");
   const out = run("npx wrangler kv namespace create KV");
   const m = out.match(/id\s*=\s*"([a-f0-9]{32})"/) || out.match(/"id"\s*:\s*"([a-f0-9]{32})"/);
   if (!m) {
     console.error("Could not read the new namespace id from:\n" + out);
     process.exit(1);
   }
-  ns = { id: m[1], title: TITLE };
+  ns = { id: m[1], title: "KV" };
 }
-const toml = fs.readFileSync("wrangler.toml", "utf8");
 const patched = toml.replace(/(\[\[kv_namespaces\]\][\s\S]*?\bid\s*=\s*)"[^"]*"/, `$1"${ns.id}"`);
 if (patched === toml) {
   console.error("Could not find the kv_namespaces id in wrangler.toml");
   process.exit(1);
 }
 fs.writeFileSync("wrangler.toml", patched);
-console.log(`KV namespace "${TITLE}" = ${ns.id}`);
+console.log(`KV namespace "${ns.title}" = ${ns.id}`);
