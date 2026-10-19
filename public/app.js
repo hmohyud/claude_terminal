@@ -471,6 +471,7 @@
   function renderUsageChip() {
     const chip = $("#usage-chip");
     const b = state.live.budget;
+    const exact = b && b.source === "anthropic";
     const parts = [];
     if (state.live.today != null) parts.push(`today ${fmtCost(state.live.today)}`);
     if (b) {
@@ -479,7 +480,9 @@
         const pct = b.monthly > 0 ? b.spent / b.monthly : 1;
         parts.push(`<span class="${pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok"}">${fmtCost(Math.max(0, b.remaining))} left</span>`);
       }
+      if (!exact) parts.push(`<span title="Estimated from token counts. Add an ANTHROPIC_ADMIN_KEY secret for Anthropic's exact figures.">est.</span>`);
     }
+    chip.title = exact ? "Figures from Anthropic's cost report" : "Estimated from token counts; add an ANTHROPIC_ADMIN_KEY secret for exact figures";
     chip.innerHTML = parts.length ? parts.join(" · ") : "usage";
   }
   function renderTemplates() {
@@ -1238,7 +1241,8 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
   async function refreshUsage() {
     const u = await apiJson("/api/usage");
     state.live.budget = u.budget;
-    state.live.today = u.totals.today.cost;
+    const exact = u.official && !u.official.error ? u.official : null;
+    state.live.today = exact ? exact.today : u.totals.today.cost;
     renderUsageChip();
     return u;
   }
@@ -1250,6 +1254,20 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     try {
       const u = await refreshUsage();
       body.innerHTML = "";
+      const exact = u.official && !u.official.error ? u.official : null;
+      if (exact) {
+        body.appendChild(el("div", "section", "From Anthropic's cost report (exact, a few minutes behind)"));
+        const ex = el("div", "cards");
+        ex.appendChild(el("div", "card", `<div class="k">Today</div><div class="v">${fmtCost(exact.today)}</div><div class="s">billed by Anthropic</div>`));
+        ex.appendChild(el("div", "card", `<div class="k">This month</div><div class="v">${fmtCost(exact.month)}</div><div class="s">${u.month}</div>`));
+        ex.appendChild(el("div", "card", `<div class="k">Last 30 days</div><div class="v">${fmtCost(exact.last30)}</div><div class="s">updated ${fmtAgo(exact.at)}</div>`));
+        body.appendChild(ex);
+      } else if (u.official && u.official.error) {
+        body.appendChild(el("div", "fine", `Anthropic's cost report could not be read (${esc(u.official.error)}). Showing this terminal's estimate instead.`));
+      } else {
+        body.appendChild(el("div", "fine", "These are estimates from token counts. To show Anthropic's exact billing, add an ANTHROPIC_ADMIN_KEY secret (an Admin API key from the Console) and redeploy."));
+      }
+      body.appendChild(el("div", "section", exact ? "This terminal's own count (estimate)" : "This terminal's own count"));
       const cards = el("div", "cards");
       for (const [k, label] of [["today", "Today"], ["week", "Last 7 days"], ["month", "This month"], ["all", "All time"]]) {
         const s = u.totals[k];
@@ -1278,8 +1296,8 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         fill.className = pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "";
         bar.appendChild(fill);
         row.appendChild(bar);
-        row.appendChild(el("span", "", `${fmtCost(u.budget.spent)} spent · <b>${fmtCost(Math.max(0, u.budget.remaining))} remaining</b> of ${fmtCost(u.budget.monthly)} in ${u.month}`));
-      } else row.appendChild(el("span", "", `No budget set. ${fmtCost(u.budget.spent)} spent in ${u.month}.`));
+        row.appendChild(el("span", "", `${fmtCost(u.budget.spent)} spent · <b>${fmtCost(Math.max(0, u.budget.remaining))} remaining</b> of ${fmtCost(u.budget.monthly)} in ${u.month}${u.budget.source === "anthropic" ? " (per Anthropic)" : " (estimate)"}`));
+      } else row.appendChild(el("span", "", `No budget set. ${fmtCost(u.budget.spent)} spent in ${u.month}${u.budget.source === "anthropic" ? " per Anthropic" : " (estimate)"}.`));
       body.appendChild(row);
 
       body.appendChild(el("div", "section", "Rate limits (from the last reply)"));
@@ -1321,7 +1339,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         for (const r of u.recent) tb.insertAdjacentHTML("beforeend", `<tr><td>${new Date(r.ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</td><td>${esc(r.model)}</td><td class="num">${fmtNum(r.input + (r.cacheRead || 0))}</td><td class="num">${fmtNum(r.output)}</td><td class="num">${(r.ms / 1000).toFixed(1)}s</td><td class="num">${fmtCost(r.cost)}</td></tr>`);
         body.appendChild(tb);
       }
-      body.appendChild(el("div", "fine", "Costs are estimates: token counts at list prices, recorded by this terminal only. The official figure is on console.anthropic.com."));
+      body.appendChild(el("div", "fine", exact ? "The terminal's own count covers only replies sent through it; Anthropic's figures cover everything billed to the account." : "Costs are estimates: token counts at list prices, recorded by this terminal only. The official figure is on console.anthropic.com."));
     } catch (e) {
       body.textContent = "Could not load usage: " + e.message;
     }

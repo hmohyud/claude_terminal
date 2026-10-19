@@ -333,7 +333,49 @@ async function appendUsage(env, entry) {
   months[mk] = summarize(entries);
   await Promise.all([env.KV.put(`usage:${mk}`, JSON.stringify(entries)), env.KV.put("usage:months", JSON.stringify(months))]);
 }
+// Anthropic's own cost figures, via the Admin API cost report. Needs an
+// Admin API key (ANTHROPIC_ADMIN_KEY secret). Cached for five minutes; the
+// report itself lags real usage by a few minutes.
+async function officialSpend(env) {
+  if (!env.ANTHROPIC_ADMIN_KEY) return null;
+  const cached = await env.KV.get("usage:official", "json");
+  if (cached && Date.now() - cached.at < 5 * 60_000) return cached;
+  const now = new Date();
+  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const startingAt = new Date(Math.min(monthStart, Date.now() - 30 * 86_400_000)).toISOString();
+  const url = new URL("https://api.anthropic.com/v1/organizations/cost_report");
+  url.searchParams.set("starting_at", startingAt);
+  url.searchParams.set("ending_at", new Date(Date.now() + 86_400_000).toISOString());
+  url.searchParams.set("bucket_width", "1d");
+  url.searchParams.set("limit", "31");
+  let out;
+  try {
+    const r = await fetch(url, {
+      headers: { "x-api-key": env.ANTHROPIC_ADMIN_KEY, "anthropic-version": "2023-06-01", "User-Agent": "claude-terminal/2.0 (https://github.com/hmohyud/claude_terminal)" },
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      out = { at: Date.now(), error: (body.error && body.error.message) || `HTTP ${r.status}` };
+    } else {
+      // Amounts are decimal strings in cents.
+      const days = (body.data || []).map((b) => ({
+        day: String(b.starting_at || "").slice(0, 10),
+        cost: Math.round(b.results.reduce((s, x) => s + Number(x.amount || 0), 0)) / 100,
+      }));
+      const today = now.toISOString().slice(0, 10);
+      const month = today.slice(0, 7);
+      const sum = (f) => Math.round(days.filter(f).reduce((s, d) => s + d.cost, 0) * 100) / 100;
+      out = { at: Date.now(), source: "anthropic", today: sum((d) => d.day === today), month: sum((d) => d.day.startsWith(month)), last30: sum(() => true), days };
+    }
+  } catch (e) {
+    out = { at: Date.now(), error: e.message };
+  }
+  await env.KV.put("usage:official", JSON.stringify(out), { expirationTtl: 3600 });
+  return out;
+}
+
 async function usageReport(env, settings) {
+  const official = await officialSpend(env);
   const now = Date.now();
   const cur = monthKey(now);
   const prev = monthKey(now - 31 * 86_400_000);
@@ -355,7 +397,9 @@ async function usageReport(env, settings) {
     const slice = recent.filter((e) => e.ts >= d0 && e.ts < d0 + 86_400_000);
     days.push({ day: new Date(d0).toISOString().slice(0, 10), cost: summarize(slice).cost, requests: slice.length });
   }
-  const monthCost = summarize(monthEntries).cost;
+  const estimatedMonth = summarize(monthEntries).cost;
+  const exact = official && !official.error ? official : null;
+  const monthCost = exact ? exact.month : estimatedMonth;
   const budget = settings.monthlyBudget;
   return {
     now, month: cur,
@@ -367,7 +411,12 @@ async function usageReport(env, settings) {
     },
     byModel: Object.entries(byModel).map(([model, entries]) => ({ model, ...summarize(entries) })).sort((a, b) => b.cost - a.cost),
     days,
-    budget: { monthly: budget, spent: monthCost, remaining: budget == null ? null : Math.round((budget - monthCost) * 1e6) / 1e6 },
+    official,
+    budget: {
+      monthly: budget, spent: monthCost, estimated: estimatedMonth,
+      remaining: budget == null ? null : Math.round((budget - monthCost) * 1e6) / 1e6,
+      source: exact ? "anthropic" : "estimate",
+    },
     recent: recent.slice(-25).reverse(),
   };
 }
@@ -475,7 +524,7 @@ async function route(request, env, ctx, url) {
   if (!env.ACCESS_KEY || env.ACCESS_KEY.length < 8) return json({ error: "The Worker has no ACCESS_KEY secret (or it is shorter than 8 characters)." }, 503);
 
   if (path === "/api/me" && method === "GET") {
-    return json({ authed: await isAuthed(env, request), defaultModel: DEFAULT_MODEL, legalPrompt: LEGAL_SYSTEM_PROMPT, limits, hasApiKey: !!env.ANTHROPIC_API_KEY });
+    return json({ authed: await isAuthed(env, request), defaultModel: DEFAULT_MODEL, legalPrompt: LEGAL_SYSTEM_PROMPT, limits, hasApiKey: !!env.ANTHROPIC_API_KEY, hasAdminKey: !!env.ANTHROPIC_ADMIN_KEY });
   }
 
   if (path === "/api/login" && method === "POST") {

@@ -6,6 +6,8 @@
 #   CLOUDFLARE_ACCOUNT_ID   from the Cloudflare dashboard (Workers & Pages → overview)
 #   ANTHROPIC_API_KEY       your Anthropic API key
 #   ACCESS_KEY              the private key that unlocks the terminal (long and random)
+#   ANTHROPIC_ADMIN_KEY     optional: an Admin API key (sk-ant-admin...) so the usage
+#                           panel shows Anthropic's exact spend instead of an estimate
 #
 # GitHub Pages must be set to "GitHub Actions" as its source; the pages job
 # turns that on if it can.
@@ -95,6 +97,11 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+      - name: Set the optional Admin API key (exact spend figures)
+        if: ${{ env.ANTHROPIC_ADMIN_KEY != '' }}
+        env:
+          ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
+        run: printf '%s' "$ANTHROPIC_ADMIN_KEY" | npx wrangler secret put ANTHROPIC_ADMIN_KEY
 
   pages:
     needs: worker

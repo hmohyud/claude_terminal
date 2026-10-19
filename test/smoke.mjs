@@ -14,7 +14,7 @@ const KEY = "smoke-test-access-key";
 const base = `http://127.0.0.1:${PORT}`;
 const H = { "X-Requested-With": "claude-terminal", "Content-Type": "application/json" };
 
-const cmd = `npx wrangler dev --port ${PORT} --ip 127.0.0.1 --persist-to "${persist}" --var ACCESS_KEY:${KEY} --var MAX_THREADS:5 --var MAX_FILES:5 --show-interactive-dev-session=false`;
+const cmd = `npx wrangler dev --port ${PORT} --ip 127.0.0.1 --persist-to "${persist}" --var ACCESS_KEY:${KEY} --var MAX_THREADS:5 --var MAX_FILES:5 --var ANTHROPIC_ADMIN_KEY:sk-ant-admin-smoke-invalid --show-interactive-dev-session=false`;
 const child = spawn(cmd, { cwd: root, shell: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } });
 let out = "";
 child.stdout.on("data", (d) => (out += d));
@@ -128,6 +128,8 @@ try {
   const rep = await fetch(`${base}/api/usage`, { method: "POST", headers: auth, body: JSON.stringify({ model: "claude-opus-5-5", conv: "smoke02", usage: { input_tokens: 1000, output_tokens: 500 }, ms: 1200, stop: "end_turn" }) });
   const repj = await rep.json();
   check("usage entry is recorded with a cost", rep.status === 200 && Math.abs(repj.cost - 0.014) < 1e-6 && repj.today === repj.cost, JSON.stringify(repj));
+  const report = await (await fetch(`${base}/api/usage`, { headers: authGet })).json();
+  check("an invalid Admin key falls back to the estimate", report.official && report.official.error && report.budget.source === "estimate" && report.budget.spent === repj.cost, JSON.stringify({ official: report.official, budget: report.budget }));
 } catch (e) {
   check("unexpected error", false, e.message);
 } finally {
