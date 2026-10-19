@@ -1,0 +1,113 @@
+# Checks every push, and auto-deploys main to your server over SSH.
+#
+# The deploy job only runs once these repository secrets exist
+# (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST      hostname or IP of the server
+#   DEPLOY_USER      SSH user on that server (needs to be able to run docker)
+#   DEPLOY_SSH_KEY   private key for that user (the matching public key goes in
+#                    the server's ~/.ssh/authorized_keys)
+#   DEPLOY_PORT      optional, SSH port, default 22
+#   DEPLOY_PATH      optional, directory on the server, default ~/claude-terminal
+#
+# The server needs Docker with the compose plugin, and a .env file inside
+# DEPLOY_PATH (copy .env.example and fill it in). That .env is never
+# overwritten by a deploy.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      has_target: ${{ steps.target.outputs.has_target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --check server.js && node --check public/app.js
+      - run: npm test
+      - name: Build the container image
+        run: docker build -t claude-terminal:ci .
+      - name: Is a deploy target configured?
+        id: target
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ]; then echo "has_target=true" >> "$GITHUB_OUTPUT"; else echo "has_target=false" >> "$GITHUB_OUTPUT"; echo "No DEPLOY_HOST secret set; skipping deploy."; fi
+
+  deploy:
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check.outputs.has_target == 'true'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '~/claude-terminal' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          cat > ~/.ssh/config <<EOF
+          Host deploy
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            Port $DEPLOY_PORT
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Copy the app to the server
+        run: |
+          ssh deploy "mkdir -p $DEPLOY_PATH"
+          rsync -az --delete \
+            --exclude .git --exclude .github --exclude .claude --exclude node_modules \
+            --exclude data --exclude .env --exclude test \
+            ./ "deploy:$DEPLOY_PATH/"
+
+      - name: Build and restart
+        run: |
+          ssh deploy "set -e
+            cd $DEPLOY_PATH
+            if [ ! -f .env ]; then
+              echo '::error::No .env on the server. Create $DEPLOY_PATH/.env from .env.example first.'
+              exit 1
+            fi
+            docker compose up -d --build --remove-orphans
+            docker image prune -f > /dev/null
+            sleep 3
+            docker compose ps"
+
+      - name: Health check
+        run: |
+          ssh deploy "set -e
+            cd $DEPLOY_PATH
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if docker compose exec -T claude-terminal wget -qO- http://127.0.0.1:3123/api/me > /dev/null 2>&1; then
+                echo 'healthy'; exit 0
+              fi
+              sleep 2
+            done
+            echo '::error::container did not become healthy'
+            docker compose logs --tail 50
+            exit 1"

@@ -1,77 +1,61 @@
 # claude terminal
 
-A small, password-gated web terminal for talking to Claude with your own Anthropic API key. Runs locally with Node, no build step.
+Chat with Claude in your browser using your own API key. One password protects it, and your browser stays signed in for 30 days.
 
-- Streams replies, renders markdown and highlighted code, shows Claude's thinking summary.
-- Every model your key can see, with per-model effort control and refusal fallback.
-- Usage tracking: cost per reply, per chat, today / week / month / all time, a monthly budget with **remaining** readout, and the live rate limits from the last response.
-- Files: drop, paste, or attach images, PDFs, and text/code files; download anything Claude writes (code blocks, replies, whole chats); a files panel to re-attach, download, or delete.
-- Chats are saved in the browser (localStorage); uploads and the usage ledger are saved on disk in `data/`.
+![terminal](https://img.shields.io/badge/node-22%2B-brightgreen) ![deploy](https://github.com/hmohyud/claude_terminal/actions/workflows/deploy.yml/badge.svg)
 
-## Setup
+## Run it on your computer
 
-```bash
-npm install
-```
+1. Install [Node.js](https://nodejs.org) (22 or newer), then in this folder run `npm install`.
+2. Copy `.env.example` to `.env`. Paste your API key after `ANTHROPIC_API_KEY=` and pick a password after `TERMINAL_PASSWORD=`.
+3. Run `npm start` and open http://127.0.0.1:3123.
 
-Create `.env` (copy `.env.example`) and fill in:
+That's it. To change the password later, edit `.env` and restart; everyone gets signed out.
 
-| key | what |
-|---|---|
-| `ANTHROPIC_API_KEY` | your API key |
-| `TERMINAL_PASSWORD` | the password that gates the terminal (8+ characters) |
-| `SESSION_SECRET` | leave blank; generated and saved on first start |
-| `SESSION_DAYS` | how long a login lasts (default 30) |
-| `HOST` / `PORT` | `127.0.0.1:3123` by default |
-| `COOKIE_SECURE` | set to `1` when behind HTTPS |
-| `MONTHLY_BUDGET_USD` | optional starting budget; you can also set it in the usage panel |
+## What it does
 
-## Run
+- **Chat** with streaming replies, formatted text and code. Pick any model your key can use, and how hard it should think.
+- **Files**: drop, paste or attach images, PDFs, Word documents (.docx) and text or code files. Click any file to preview it in place. Download anything Claude writes: a code block, a reply, or the whole chat.
+- **Usage**: every reply shows its cost. The `usage` button shows today, this week, this month and all time, what's left of a monthly budget you set, and your current rate limits.
+- Type `/help` in the chat box for the full list of commands (switch model, set a system prompt, export, budget, and so on).
+
+## Put it on a server so it updates itself
+
+Every push to `main` on GitHub tests the code, builds it, and deploys it to your server. You need a Linux server you can SSH into (a cheap VPS, a home server, a Raspberry Pi all work).
+
+**Step 1, on the server.** Log in as the user that should run the app and run:
 
 ```bash
-npm start
+curl -fsSL https://raw.githubusercontent.com/hmohyud/claude_terminal/main/deploy/server-setup.sh -o server-setup.sh && bash server-setup.sh
 ```
 
-Open http://127.0.0.1:3123, enter the password, and you're in. `npm run dev` restarts on file changes.
+It installs Docker if needed, asks for your API key, a password, and optionally a domain name (which gets you automatic HTTPS). It then prints four values.
 
-## Using it
+**Step 2, on GitHub.** Open the repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**. Add the four values the script printed, one secret each:
 
-Type to chat. Enter sends, Shift+Enter adds a line, Esc stops a reply, ↑/↓ recall earlier messages. Drop files anywhere or paste an image.
-
-Slash commands (`/help` lists them):
-
-| command | does |
+| name | what it is |
 |---|---|
-| `/new`, `/clear`, `/delete`, `/title <text>` | manage the current chat |
-| `/model [name]`, `/models` | switch model (prefix match, e.g. `/model sonnet`), list models and prices |
-| `/system [text\|clear]` | per-chat system prompt |
-| `/effort low\|medium\|high\|xhigh\|max\|default` | reasoning effort |
-| `/thinking on\|off` | show the thinking summary |
-| `/max <n>` | max output tokens (default 16000) |
-| `/fallback on\|off` | server-side fallback to another model if a reply is refused by safety classifiers |
-| `/retry`, `/undo` | regenerate the last reply, drop the last exchange |
-| `/export [md\|json]` | download the chat |
-| `/files`, `/usage`, `/context` | files panel, usage panel, token count of the current context |
-| `/budget <usd\|off>` | monthly budget for the remaining readout |
-| `/logout` | sign this browser out |
+| `DEPLOY_HOST` | the server's address |
+| `DEPLOY_USER` | the user you ran the script as |
+| `DEPLOY_PATH` | the folder on the server (normally `~/claude-terminal`) |
+| `DEPLOY_SSH_KEY` | the private key block the script printed |
 
-Each reply has **copy / download / save to files / retry**; each code block has **copy / download**. Hover a message to see the buttons.
+**Step 3.** Push to `main`, or open the **Actions** tab and run **deploy**. Watch it there; the first run takes a couple of minutes. From now on every push redeploys.
 
-## How the password gate works
+Where your secrets live: the API key and password are only in `.env` on the server; GitHub only holds the SSH details, and deploys never overwrite `.env`. Until the four secrets exist, pushes just run the checks.
 
-- The cookie never holds the password. It holds an expiry and a nonce signed with an HMAC derived from `SESSION_SECRET` **and** the password. Changing either in `.env` logs every browser out.
-- The cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` when `COOKIE_SECURE=1`. Every API write also needs a custom header, so cross-site forms cannot drive it.
-- Logins get 5 free tries per IP, then an exponential lockout (1 min, 2, 4 ... up to an hour), and every attempt is delayed a little.
-- The API key stays on the server; the browser never sees it.
+Without a domain name the terminal is served over plain HTTP on port 3123, which is fine on a home network or over Tailscale but not for the open internet. Give the script a domain (any DNS name pointing at the server) and it serves HTTPS with a certificate that renews itself.
 
-To use it from your phone or another machine on your network, set `HOST=0.0.0.0` and open `http://<this-machine's-ip>:3123`. If you expose it beyond your LAN, put it behind HTTPS (Caddy, Tailscale, a reverse proxy) and set `COOKIE_SECURE=1` and, behind a proxy, `TRUST_PROXY=1`.
+Prefer a hosted platform? Railway, Render and Fly.io can build the `Dockerfile` straight from this repo with their own auto-deploy. Set the variables from `.env.example` in their dashboard and mount a persistent disk at `/data`.
 
-## Data on disk
+## Your data
 
-| path | holds |
-|---|---|
-| `data/usage.jsonl` | one line per request: model, tokens, estimated cost, duration |
-| `data/uploads/` + `data/files.json` | uploaded files and their index |
-| `data/settings.json` | the monthly budget |
+Chats are stored in your browser. On the server, `data/` holds uploaded files, the usage history, your budget, and the login secret (in Docker that is the `claude-terminal-data` volume). Costs are estimates from token counts at list prices; the official number is on console.anthropic.com.
 
-Costs are estimates from token counts times list prices, counted by this terminal only. The authoritative number is the usage page on console.anthropic.com. `.env` and `data/` are git-ignored.
+## How the password protection works
+
+The login cookie never contains the password. It holds a signed, expiring token, and the signature depends on both the password and a secret, so changing either signs everyone out. The cookie cannot be read by page scripts or sent by other sites, five wrong guesses in a row lock that address out with growing delays, and the API key never leaves the server.
+
+## For developers
+
+`npm run dev` restarts on changes. `npm test` runs a smoke test of the password gate. `docker compose up -d --build` runs it in Docker locally. The deploy workflow is [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) and the server script is [`deploy/server-setup.sh`](deploy/server-setup.sh). All settings are listed in [`.env.example`](.env.example).

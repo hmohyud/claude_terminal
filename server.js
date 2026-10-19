@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
+import mammoth from "mammoth";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.join(here, ".env");
@@ -22,7 +23,7 @@ const PASSWORD = process.env.TERMINAL_PASSWORD || "";
 const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS) || 30);
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "1";
 const COOKIE_NAME = "ct_session";
-const DATA_DIR = path.join(here, "data");
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(here, "data");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const LEDGER_PATH = path.join(DATA_DIR, "usage.jsonl");
 const SETTINGS_PATH = path.join(DATA_DIR, "settings.json");
@@ -34,21 +35,24 @@ if (PASSWORD.length < 8) fatal("TERMINAL_PASSWORD must be at least 8 characters.
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+// SESSION_SECRET can come from the environment; otherwise it is generated once
+// and kept in DATA_DIR so logins survive restarts and container rebuilds.
 let SESSION_SECRET = process.env.SESSION_SECRET || "";
 if (!SESSION_SECRET) {
-  SESSION_SECRET = crypto.randomBytes(32).toString("hex");
+  const secretFile = path.join(DATA_DIR, "session-secret");
   try {
-    let text = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
-    if (/^SESSION_SECRET=.*$/m.test(text)) {
-      text = text.replace(/^SESSION_SECRET=.*$/m, `SESSION_SECRET=${SESSION_SECRET}`);
-    } else {
-      if (text && !text.endsWith("\n")) text += "\n";
-      text += `SESSION_SECRET=${SESSION_SECRET}\n`;
-    }
-    fs.writeFileSync(envPath, text);
-    log("Generated SESSION_SECRET and saved it to .env");
+    SESSION_SECRET = fs.readFileSync(secretFile, "utf8").trim();
   } catch {
-    log("Warning: could not save SESSION_SECRET to .env; logins will not survive a restart.");
+    /* none yet */
+  }
+  if (!SESSION_SECRET) {
+    SESSION_SECRET = crypto.randomBytes(32).toString("hex");
+    try {
+      fs.writeFileSync(secretFile, SESSION_SECRET + "\n", { mode: 0o600 });
+      log(`Generated a session secret and saved it to ${secretFile}`);
+    } catch {
+      log("Warning: could not save the session secret; logins will not survive a restart.");
+    }
   }
 }
 
@@ -233,6 +237,8 @@ const TEXT_EXT = new Set([
 const MAX_IMAGE = 5 * 1024 * 1024;
 const MAX_PDF = 32 * 1024 * 1024;
 const MAX_TEXT_FILE = 2 * 1024 * 1024;
+const MAX_DOCX = 20 * 1024 * 1024;
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 function classifyFile(name, mime) {
   const ext = (name.includes(".") ? name.split(".").pop() : name).toLowerCase();
@@ -244,6 +250,8 @@ function classifyFile(name, mime) {
   if (ext === "gif") return { kind: "image", mime: "image/gif" };
   if (ext === "webp") return { kind: "image", mime: "image/webp" };
   if (mime === "application/pdf" || ext === "pdf") return { kind: "pdf", mime: "application/pdf" };
+  if (mime === DOCX_MIME || ext === "docx") return { kind: "docx", mime: DOCX_MIME };
+  if (mime === "application/msword" || ext === "doc") return { error: `"${name}" is an old-style .doc file. Open it in Word and save it as .docx first.` };
   if (mime.startsWith("text/") || TEXT_EXT.has(ext) || ["application/json", "application/xml", "application/javascript", "application/x-yaml", "application/toml"].includes(mime)) {
     return { kind: "text", mime: mime || "text/plain" };
   }
@@ -261,6 +269,10 @@ function fileToBlock(entry) {
   }
   if (entry.kind === "pdf") {
     return { type: "document", source: { type: "base64", media_type: "application/pdf", data: buf.toString("base64") }, title: entry.name };
+  }
+  if (entry.kind === "docx") {
+    const text = fs.readFileSync(path.join(UPLOAD_DIR, entry.id + ".txt"), "utf8");
+    return { type: "document", source: { type: "text", media_type: "text/plain", data: text }, title: entry.name };
   }
   return { type: "document", source: { type: "text", media_type: "text/plain", data: buf.toString("utf8") }, title: entry.name };
 }
@@ -375,6 +387,7 @@ app.use((req, res, next) => {
       "font-src 'self' https://cdnjs.cloudflare.com",
       "img-src 'self' data: blob:",
       "connect-src 'self'",
+      "frame-src 'self'",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -499,20 +512,30 @@ app.get("/api/files", requireAuth, (req, res) => {
   res.json(fileIndex.slice().sort((a, b) => b.ts - a.ts));
 });
 
-app.post("/api/upload", requireAuth, (req, res) => {
+app.post("/api/upload", requireAuth, async (req, res) => {
   const name = safeName(req.query.name);
   const mime = String(req.query.type || req.get("content-type") || "");
   const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
   if (!body.length) return res.status(400).json({ error: "Empty upload" });
   const cls = classifyFile(name, mime);
-  if (!cls) return res.status(415).json({ error: `Unsupported file type for "${name}". Supported: images (png/jpg/gif/webp), PDF, and text/code files.` });
-  const limit = cls.kind === "image" ? MAX_IMAGE : cls.kind === "pdf" ? MAX_PDF : MAX_TEXT_FILE;
+  if (!cls) return res.status(415).json({ error: `Unsupported file type for "${name}". Supported: images (png/jpg/gif/webp), PDF, Word (.docx), and text/code files.` });
+  if (cls.error) return res.status(415).json({ error: cls.error });
+  const limit = { image: MAX_IMAGE, pdf: MAX_PDF, docx: MAX_DOCX }[cls.kind] || MAX_TEXT_FILE;
   if (body.length > limit) return res.status(413).json({ error: `"${name}" is too large (${(body.length / 1048576).toFixed(1)} MB; limit ${(limit / 1048576).toFixed(0)} MB for ${cls.kind}).` });
   if (cls.kind === "text") {
     try {
       new TextDecoder("utf-8", { fatal: true }).decode(body);
     } catch {
       return res.status(415).json({ error: `"${name}" is not valid UTF-8 text.` });
+    }
+  }
+  // Word files: extract the text once at upload time; that is what Claude reads.
+  let docxText = null;
+  if (cls.kind === "docx") {
+    try {
+      docxText = (await mammoth.extractRawText({ buffer: body })).value;
+    } catch {
+      return res.status(415).json({ error: `"${name}" could not be read as a Word document.` });
     }
   }
   const entry = {
@@ -526,6 +549,7 @@ app.post("/api/upload", requireAuth, (req, res) => {
   };
   try {
     fs.writeFileSync(path.join(UPLOAD_DIR, entry.id), body);
+    if (docxText != null) fs.writeFileSync(path.join(UPLOAD_DIR, entry.id + ".txt"), docxText);
     fileIndex.push(entry);
     saveFileIndex();
   } catch (e) {
@@ -542,10 +566,33 @@ function findFile(id) {
 app.get("/api/files/:id", requireAuth, (req, res) => {
   const f = findFile(req.params.id);
   if (!f) return res.status(404).json({ error: "No such file" });
-  const inline = req.query.inline === "1" && f.kind === "image";
+  const inline = req.query.inline === "1" && (f.kind === "image" || f.kind === "pdf");
   res.setHeader("Content-Type", f.mime || "application/octet-stream");
   res.setHeader("Content-Disposition", `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+  if (inline) {
+    // Let the app's own preview pane frame this response (PDFs open in an iframe).
+    res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
+  }
   res.sendFile(path.join(UPLOAD_DIR, f.id));
+});
+
+// Preview payload: Word files come back as HTML, text files as text; images and
+// PDFs are shown by the browser straight from the inline URL.
+app.get("/api/files/:id/preview", requireAuth, async (req, res) => {
+  const f = findFile(req.params.id);
+  if (!f) return res.status(404).json({ error: "No such file" });
+  const file = path.join(UPLOAD_DIR, f.id);
+  try {
+    if (f.kind === "docx") {
+      const r = await mammoth.convertToHtml({ path: file });
+      return res.json({ kind: "html", html: r.value });
+    }
+    if (f.kind === "text") return res.json({ kind: "text", text: fs.readFileSync(file, "utf8") });
+    return res.json({ kind: f.kind, url: `/api/files/${f.id}?inline=1` });
+  } catch (e) {
+    res.status(500).json({ error: `Could not render preview: ${e.message}` });
+  }
 });
 
 app.delete("/api/files/:id", requireAuth, (req, res) => {
@@ -554,6 +601,7 @@ app.delete("/api/files/:id", requireAuth, (req, res) => {
   fileIndex = fileIndex.filter((x) => x.id !== f.id);
   saveFileIndex();
   fs.rm(path.join(UPLOAD_DIR, f.id), { force: true }, () => {});
+  fs.rm(path.join(UPLOAD_DIR, f.id + ".txt"), { force: true }, () => {});
   res.json({ ok: true });
 });
 

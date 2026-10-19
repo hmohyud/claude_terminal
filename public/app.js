@@ -247,7 +247,7 @@
     const wasBottom = atBottom();
     t.innerHTML = "";
     if (!c || !c.messages.length) {
-      t.appendChild(el("div", "empty", `<b>❯ claude terminal</b><br>type a message to start · <b>/help</b> for commands<br>drop or paste files to attach them`));
+      t.appendChild(el("div", "empty", `<b>❯ claude terminal</b><br>type a message to start · <b>/help</b> for commands<br>drop or paste images, PDFs, Word or text files to attach them`));
       return;
     }
     for (const m of c.messages) t.appendChild(renderMessage(m, c));
@@ -259,26 +259,34 @@
     return t.scrollHeight - t.scrollTop - t.clientHeight < 60;
   }
 
+  const KIND_ICON = { pdf: "⎘", docx: "▤", text: "≡" };
   function fileChip(f, { removable, onRemove } = {}) {
-    const a = el(removable ? "span" : "a", "file-chip");
-    if (!removable) {
-      a.href = `/api/files/${f.id}`;
-      a.title = `download ${f.name}`;
-    }
+    const a = el("span", "file-chip");
+    a.title = `preview ${f.name}`;
+    a.addEventListener("click", () => openPreview(f));
     if (f.kind === "image") {
       const img = el("img");
       img.src = `/api/files/${f.id}?inline=1`;
       img.alt = "";
       a.appendChild(img);
     } else {
-      a.appendChild(el("span", "", f.kind === "pdf" ? "⎘" : "≡"));
+      a.appendChild(el("span", "", KIND_ICON[f.kind] || "≡"));
     }
     a.appendChild(el("span", "fname", esc(f.name)));
     a.appendChild(el("span", "fsize", fmtBytes(f.size)));
     if (removable) {
-      const rm = btn("×", onRemove, "rm");
+      const rm = btn("×", (e) => {
+        e.stopPropagation();
+        onRemove(e);
+      }, "rm");
       rm.title = "remove";
       a.appendChild(rm);
+    } else {
+      const dl = el("a", "dl", "↓");
+      dl.href = `/api/files/${f.id}`;
+      dl.title = `download ${f.name}`;
+      dl.addEventListener("click", (e) => e.stopPropagation());
+      a.appendChild(dl);
     }
     return a;
   }
@@ -652,7 +660,7 @@
   /logout              sign out of this browser
 keys
   enter send · shift+enter newline · esc stop · ↑/↓ recall earlier messages
-  paste or drop images, PDFs, and text/code files to attach them`;
+  paste or drop images, PDFs, Word (.docx) and text/code files to attach them · click a file to preview it`;
 
   async function runCommand(line) {
     const [cmd, ...rest] = line.slice(1).trim().split(/\s+/);
@@ -932,6 +940,7 @@ keys
         } else row.appendChild(el("span", "kind", f.kind));
         row.appendChild(el("span", "fname", esc(f.name)));
         row.appendChild(el("span", "fmeta", `${fmtBytes(f.size)} · ${new Date(f.ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}${f.source === "assistant" ? " · from claude" : ""}`));
+        row.appendChild(btn("preview", () => openPreview(f), "small"));
         row.appendChild(btn("attach", () => {
           if (!state.attachments.find((x) => x.id === f.id)) state.attachments.push(f);
           renderAttachments();
@@ -950,6 +959,47 @@ keys
       }
     } catch (e) {
       body.textContent = "could not load files: " + e.message;
+    }
+  }
+
+  // ------------------------------------------------------------ preview
+  async function openPreview(f) {
+    const panel = $("#preview-panel");
+    panel.classList.remove("hidden");
+    $("#preview-title").textContent = f.name;
+    $("#preview-dl").href = `/api/files/${f.id}`;
+    const body = $("#preview-body");
+    body.innerHTML = "";
+    if (f.kind === "image") {
+      const img = el("img", "preview-img");
+      img.src = `/api/files/${f.id}?inline=1`;
+      img.alt = f.name;
+      body.appendChild(img);
+      return;
+    }
+    if (f.kind === "pdf") {
+      const frame = el("iframe", "preview-frame");
+      frame.src = `/api/files/${f.id}?inline=1`;
+      frame.title = f.name;
+      body.appendChild(frame);
+      return;
+    }
+    body.appendChild(el("div", "preview-loading", "loading…"));
+    try {
+      const p = await apiJson(`/api/files/${f.id}/preview`);
+      body.innerHTML = "";
+      if (p.kind === "html") {
+        const doc = el("div", "doc-preview");
+        doc.innerHTML = window.DOMPurify ? DOMPurify.sanitize(p.html) : esc(p.html);
+        body.appendChild(doc);
+      } else if (p.kind === "text") {
+        body.appendChild(el("pre", "text-preview", esc(p.text)));
+      } else {
+        body.appendChild(el("div", "preview-loading", "no preview for this file type"));
+      }
+    } catch (e) {
+      body.innerHTML = "";
+      body.appendChild(el("div", "preview-loading", "could not load preview: " + esc(e.message)));
     }
   }
 
