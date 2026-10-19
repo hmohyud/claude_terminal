@@ -754,7 +754,7 @@
       conv: t.id, model: t.model || state.settings.model || state.defaultModel, system: composeSystem(t),
       messages: toApiMessages(t.messages.filter((m) => m !== am)),
       effort: info && info.efforts.includes(state.settings.effort) ? state.settings.effort : null,
-      maxTokens: state.settings.maxTokens || 16000, showThinking: state.settings.showThinking !== false, fallbacks: state.settings.fallbacks !== false,
+      maxTokens: state.settings.maxTokens || 32000, showThinking: state.settings.showThinking !== false, fallbacks: state.settings.fallbacks !== false,
     };
     try {
       const res = await api("/api/chat", { method: "POST", body, signal: ctrl.signal });
@@ -1049,7 +1049,7 @@
   /effort <level>       low (fast) · medium · high (slower) · xhigh (slow) · max (very slow) · default
   /thinking on|off      show the reasoning summary
   /highlight on|off     color-code legal references
-  /max <n>              longest reply, in tokens
+  /max <n>              longest reply, in output tokens (documents don't count)
   /fallback on|off      retry on another model if a reply is refused by safety filters
   /retry · /undo        regenerate the last answer · remove the last exchange
   /export [md|docx|json] download this thread
@@ -1194,12 +1194,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     }
   }
   function applyTheme() {
-    const dark = state.settings.theme === "dark";
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
-    const l = $("#hljs-light");
-    const d = $("#hljs-dark");
-    if (l) l.disabled = dark;
-    if (d) d.disabled = !dark;
+    document.documentElement.dataset.theme = "light";
     document.body.classList.toggle("no-highlight", state.settings.highlight === false);
   }
   function openSettings() {
@@ -1209,8 +1204,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     fillSelect($("#set-mode"), [...MODES.map((m) => new Option(`${m.label} · ${m.desc}`, m.model)), ...(modeFor(curModel) ? [] : [new Option(`Custom · ${curModel}`, curModel)])], curModel);
     fillSelect($("#set-jurisdiction"), [new Option("none", ""), ...JURISDICTIONS.map((j) => new Option(j, j))], s.jurisdiction || "");
     $("#set-budget").value = s.monthlyBudget == null ? "" : s.monthlyBudget;
-    $("#set-max").value = s.maxTokens || 16000;
-    $("#set-theme").value = s.theme === "dark" ? "dark" : "light";
+    $("#set-max").value = s.maxTokens || 32000;
     $("#set-highlight").checked = s.highlight !== false;
     $("#set-thinking").checked = s.showThinking !== false;
     $("#set-fallback").checked = s.fallbacks !== false;
@@ -1225,8 +1219,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       model: $("#set-mode").value || null,
       jurisdiction: $("#set-jurisdiction").value || null,
       monthlyBudget: $("#set-budget").value === "" ? null : Number($("#set-budget").value),
-      maxTokens: Number($("#set-max").value) || 16000,
-      theme: $("#set-theme").value,
+      maxTokens: Number($("#set-max").value) || 32000,
       highlight: $("#set-highlight").checked,
       showThinking: $("#set-thinking").checked,
       fallbacks: $("#set-fallback").checked,

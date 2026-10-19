@@ -7,8 +7,7 @@
 <meta name="referrer" content="no-referrer">
 <title>claude terminal</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a5f'/%3E%3Ctext x='9' y='23' font-family='Georgia,serif' font-size='19' fill='%23ffffff'%3E%C2%A7%3C/text%3E%3C/svg%3E">
-<link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
-<link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" disabled>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -127,8 +126,7 @@
           <label class="field">Default mode for new threads <select id="set-mode"></select></label>
           <label class="field">Default jurisdiction <select id="set-jurisdiction"></select></label>
           <label class="field">Monthly limit (USD), for the remaining readout <input id="set-budget" type="number" min="0" step="1" placeholder="none"></label>
-          <label class="field">Longest reply (tokens) <input id="set-max" type="number" min="256" max="128000" step="1000"></label>
-          <label class="field">Appearance <select id="set-theme"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+          <label class="field" title="Caps how long one answer can be. Attached documents and the conversation so far do not count toward it.">Longest reply (output tokens; about 0.75 words each) <input id="set-max" type="number" min="256" max="128000" step="1000"></label>
         </div>
         <label class="check"><input type="checkbox" id="set-highlight"> Color-code legal references in answers and previews</label>
         <div id="legend" class="legend">

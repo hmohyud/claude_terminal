@@ -39,7 +39,7 @@ How to work:
 - You assist a person who makes the decisions. Note when something warrants review by a licensed attorney in the relevant jurisdiction, but do not pad answers with repeated disclaimers.`;
 
 const SETTING_DEFAULTS = {
-  monthlyBudget: null, model: null, effort: "high", showThinking: true, maxTokens: 16000, fallbacks: true,
+  monthlyBudget: null, model: null, effort: "high", showThinking: true, maxTokens: 32000, fallbacks: true,
   theme: "light", jurisdiction: "Federal (U.S.)", systemPrompt: null, highlight: true,
 };
 
@@ -479,7 +479,7 @@ async function parseChatRequest(env, body) {
   let effort = typeof body.effort === "string" ? body.effort : null;
   if (effort && (!info || !info.efforts.includes(effort))) effort = null;
   let maxTokens = Number(body.maxTokens);
-  if (!Number.isFinite(maxTokens)) maxTokens = 16000;
+  if (!Number.isFinite(maxTokens)) maxTokens = 32000;
   maxTokens = Math.max(256, Math.min(128000, Math.floor(maxTokens)));
   const showThinking = body.showThinking !== false;
   const fallbacks = body.fallbacks !== false && !!(info && info.fallbacks);
