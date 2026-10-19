@@ -464,6 +464,7 @@
   function renderStats() {
     const t = active();
     const s = $("#thread-stats");
+    if (!s) return;
     if (!t || !t.messages.length) return (s.textContent = "");
     s.textContent = `${fmtNum(t.tokens.in)} in · ${fmtNum(t.tokens.out)} out · ${fmtCost(t.cost)} this thread`;
   }
@@ -483,6 +484,7 @@
   }
   function renderTemplates() {
     const box = $("#templates");
+    if (!box) return;
     box.innerHTML = "";
     for (const tpl of TEMPLATES) {
       const b = btn(tpl.label, () => useTemplate(tpl));

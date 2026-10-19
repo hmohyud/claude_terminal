@@ -69,7 +69,6 @@
 
     <form id="composer">
       <div id="attachments" class="hidden"></div>
-      <div id="templates" class="templates"></div>
       <div class="row">
         <textarea id="input" rows="1" placeholder="Ask a question, or attach a document and pick a task above…" spellcheck="true"></textarea>
         <div class="row-btns">
@@ -78,11 +77,6 @@
           <button type="button" id="stop" class="danger hidden" title="Stop (Esc)">Stop</button>
         </div>
       </div>
-      <div class="hint">
-        <span>Enter to send · Shift+Enter for a new line · drop files anywhere · <b>/help</b> for commands</span>
-        <span id="thread-stats"></span>
-      </div>
-      <div class="disclaimer">AI output can be wrong. Verify every citation, date and deadline before relying on it. This is not legal advice.</div>
       <input type="file" id="file" multiple hidden>
     </form>
   </main>
