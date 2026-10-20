@@ -1,6 +1,6 @@
 // Boots the Worker locally with `wrangler dev` (local KV, throwaway access
-// key) and checks the access-key gate, thread storage with first-in-first-out
-// eviction, settings, and file storage. Never calls the Anthropic API.
+// key) and checks the access-key gate, the chat relay's guards, and usage
+// reporting. Never calls the Anthropic API with a real key.
 import { spawn, execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,7 +14,7 @@ const KEY = "smoke-test-access-key";
 const base = `http://127.0.0.1:${PORT}`;
 const H = { "X-Requested-With": "claude-terminal", "Content-Type": "application/json" };
 
-const cmd = `npx wrangler dev --port ${PORT} --ip 127.0.0.1 --persist-to "${persist}" --var ACCESS_KEY:${KEY} --var MAX_THREADS:5 --var MAX_FILES:5 --var ANTHROPIC_ADMIN_KEY:sk-ant-admin-smoke-invalid --show-interactive-dev-session=false`;
+const cmd = `npx wrangler dev --port ${PORT} --ip 127.0.0.1 --persist-to "${persist}" --var ACCESS_KEY:${KEY} --var ANTHROPIC_API_KEY:sk-ant-smoke-invalid --var ANTHROPIC_ADMIN_KEY:sk-ant-admin-smoke-invalid --var MONTHLY_LIMIT_USD:50 --show-interactive-dev-session=false`;
 const child = spawn(cmd, { cwd: root, shell: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } });
 let out = "";
 child.stdout.on("data", (d) => (out += d));
@@ -58,7 +58,7 @@ try {
   check("serves the page", page.ok && (await page.text()).includes("claude terminal"));
 
   const me = await (await fetch(`${base}/api/me`)).json();
-  check("not authed by default", me.authed === false && me.limits && me.limits.threads === 5, JSON.stringify(me));
+  check("not authed by default", me.authed === false && typeof me.legalPrompt === "string", JSON.stringify(me).slice(0, 200));
 
   const noHeader = await fetch(`${base}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: KEY }) });
   check("login without X-Requested-With is refused", noHeader.status === 403, `status ${noHeader.status}`);
@@ -76,60 +76,26 @@ try {
   const auth = { ...H, Authorization: `Bearer ${login.token}` };
   const authGet = { Authorization: `Bearer ${login.token}` };
 
-  const usage = await fetch(`${base}/api/usage`, { headers: authGet });
-  check("usage works with the token", usage.status === 200, `status ${usage.status}`);
-
   const forged = await fetch(`${base}/api/usage`, { headers: { Authorization: "Bearer 9999999999999.abc.forged" } });
   check("forged token is rejected", forged.status === 401, `status ${forged.status}`);
 
-  const chat = await fetch(`${base}/api/chat`, { method: "POST", headers: auth, body: JSON.stringify({ messages: [] }) });
-  check("chat refuses without an API key or valid input", chat.status === 503 || chat.status === 400, `status ${chat.status}`);
+  const chat = await fetch(`${base}/api/chat`, { method: "POST", headers: auth, body: JSON.stringify({ model: "claude-opus-5-5", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }) });
+  const chatBody = await chat.json().catch(() => ({}));
+  check("a rejected API key surfaces as an error, not a sign-out", chat.status === 502 && /API key/i.test(chatBody.error || ""), `status ${chat.status} ${JSON.stringify(chatBody)}`);
+  const chatNoJson = await fetch(`${base}/api/chat`, { method: "POST", headers: { ...authGet, "X-Requested-With": "claude-terminal" }, body: "x" });
+  check("chat requires a JSON body", chatNoJson.status === 400 || chatNoJson.status === 503, `status ${chatNoJson.status}`);
 
-  // threads: save, read back, bad id, FIFO eviction, delete
-  const mk = (id, createdAt) => ({ id, title: `Thread ${id}`, createdAt, messages: [{ id: "m1", role: "user", text: "hello " + id, files: [], ts: createdAt }], cost: 0, tokens: { in: 0, out: 0 } });
-  const put = await fetch(`${base}/api/threads/smoke01`, { method: "PUT", headers: auth, body: JSON.stringify(mk("smoke01", 1000)) });
-  check("thread saves", put.status === 200, `status ${put.status} ${await put.text()}`);
-  const got = await (await fetch(`${base}/api/threads/smoke01`, { headers: authGet })).json();
-  check("thread round-trips", got.title === "Thread smoke01" && got.messages.length === 1 && got.messages[0].text === "hello smoke01", JSON.stringify(got).slice(0, 200));
-  const badId = await fetch(`${base}/api/threads/BAD$ID`, { method: "PUT", headers: auth, body: JSON.stringify(mk("x", 1)) });
-  check("thread rejects a bad id", badId.status === 404 || badId.status === 400, `status ${badId.status}`);
-  for (let i = 2; i <= 6; i++) await fetch(`${base}/api/threads/smoke0${i}`, { method: "PUT", headers: auth, body: JSON.stringify(mk(`smoke0${i}`, 1000 * i)) });
-  const list = await (await fetch(`${base}/api/threads`, { headers: authGet })).json();
-  const ids = list.threads.map((t) => t.id);
-  check("oldest thread is evicted past the cap (FIFO)", ids.length === 5 && !ids.includes("smoke01") && ids.includes("smoke06"), ids.join(","));
-  const gone = await fetch(`${base}/api/threads/smoke01`, { headers: authGet });
-  check("evicted thread content is removed", gone.status === 404, `status ${gone.status}`);
-  const del = await fetch(`${base}/api/threads/smoke06`, { method: "DELETE", headers: auth });
-  check("thread deletes", del.status === 200, `status ${del.status}`);
+  for (const p of ["/api/threads", "/api/files", "/api/settings"]) {
+    const r = await fetch(`${base}${p}`, { headers: authGet });
+    check(`no server storage at ${p}`, r.status === 404, `status ${r.status}`);
+  }
 
-  // settings
-  const st = await fetch(`${base}/api/settings`, { method: "PUT", headers: auth, body: JSON.stringify({ jurisdiction: "New York", effort: "medium", monthlyBudget: 12, highlight: false }) });
-  const stj = await st.json();
-  check("settings save", st.status === 200 && stj.jurisdiction === "New York" && stj.effort === "medium" && stj.monthlyBudget === 12 && stj.highlight === false, JSON.stringify(stj));
-  const stBad = await fetch(`${base}/api/settings`, { method: "PUT", headers: auth, body: JSON.stringify({ effort: "bananas" }) });
-  check("settings reject a bad effort", stBad.status === 400, `status ${stBad.status}`);
-
-  // files: upload a text file (base64), list, fetch, FIFO, delete
-  const b64 = Buffer.from("name,qty\napple,3\n").toString("base64");
-  const up = await fetch(`${base}/api/upload`, { method: "POST", headers: auth, body: JSON.stringify({ name: "fruit.csv", type: "text/csv", b64 }) });
-  const upj = await up.json();
-  check("text upload is stored", up.status === 200 && upj.kind === "text" && upj.size === 17, `status ${up.status} ${JSON.stringify(upj)}`);
-  const bad = await fetch(`${base}/api/upload`, { method: "POST", headers: auth, body: JSON.stringify({ name: "virus.exe", type: "application/octet-stream", b64 }) });
-  check("unsupported file type is refused", bad.status === 415, `status ${bad.status}`);
-  const file = await (await fetch(`${base}/api/files/${upj.id}`, { headers: authGet })).json();
-  check("file fetch returns content and text", file.b64 === b64 && file.text === "name,qty\napple,3\n", JSON.stringify(file).slice(0, 200));
-  for (let i = 0; i < 5; i++) await fetch(`${base}/api/upload`, { method: "POST", headers: auth, body: JSON.stringify({ name: `n${i}.txt`, type: "text/plain", b64 }) });
-  const files = await (await fetch(`${base}/api/files`, { headers: authGet })).json();
-  check("oldest file is evicted past the cap (FIFO)", files.files.length === 5 && !files.files.find((f) => f.id === upj.id), files.files.map((f) => f.name).join(","));
-  const fdel = await fetch(`${base}/api/files/${files.files[0].id}`, { method: "DELETE", headers: auth });
-  check("file deletes", fdel.status === 200, `status ${fdel.status}`);
-
-  // usage report from the browser
-  const rep = await fetch(`${base}/api/usage`, { method: "POST", headers: auth, body: JSON.stringify({ model: "claude-opus-5-5", conv: "smoke02", usage: { input_tokens: 1000, output_tokens: 500 }, ms: 1200, stop: "end_turn" }) });
+  const rep = await fetch(`${base}/api/usage`, { method: "POST", headers: auth, body: JSON.stringify({ model: "claude-opus-5-5", usage: { input_tokens: 1000, output_tokens: 500 }, ms: 1200, stop: "end_turn" }) });
   const repj = await rep.json();
   check("usage entry is recorded with a cost", rep.status === 200 && Math.abs(repj.cost - 0.014) < 1e-6 && repj.today === repj.cost, JSON.stringify(repj));
   const report = await (await fetch(`${base}/api/usage`, { headers: authGet })).json();
   check("an invalid Admin key falls back to the estimate", report.official && report.official.error && report.budget.source === "estimate" && report.budget.spent === repj.cost, JSON.stringify({ official: report.official, budget: report.budget }));
+  check("monthly limit comes from the Worker config", report.budget.monthly === 50 && Math.abs(report.budget.remaining - (50 - repj.cost)) < 1e-6, JSON.stringify(report.budget));
 } catch (e) {
   check("unexpected error", false, e.message);
 } finally {

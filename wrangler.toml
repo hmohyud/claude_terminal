@@ -16,13 +16,9 @@ workers_dev = true
 ALLOWED_ORIGIN = ""
 # Monthly API budget in USD, shown as "remaining" in the usage panel.
 MONTHLY_LIMIT_USD = "200"
-# Storage caps. Oldest threads/files are removed first (first in, first out).
-MAX_THREADS = "200"
-MAX_FILES = "300"
-MAX_FILES_MB = "1024"
 
-# Threads, files, settings and usage. The deploy workflow creates the namespace
-# and fills in the id; any value works for local development.
+# Login lockouts, the model list cache and spend figures. Threads, files and
+# settings are never stored here; they stay in each person's browser.
 [[kv_namespaces]]
 binding = "KV"
 id = "188ce8906ab5431f8f636ed32715db0a"

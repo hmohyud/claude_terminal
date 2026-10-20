@@ -7,6 +7,12 @@
   const PREFS_KEY = "claude-terminal.prefs";
   const TOKEN_KEY = "claude-terminal.token";
 
+  // Everything personal stays in this browser: threads, files and settings
+  // live in IndexedDB. First in, first out past these caps.
+  const LIMITS = { threads: 200, files: 300, filesMb: 512 };
+  const CAPS = { image: 5 * 1048576, pdf: 10 * 1048576, docx: 10 * 1048576, text: 2 * 1048576 };
+  const SETTING_DEFAULTS = { model: null, effort: "high", showThinking: true, maxTokens: 32000, fallbacks: true, jurisdiction: "Federal (U.S.)", systemPrompt: null, highlight: true };
+
   const JURISDICTIONS = [
     "Federal (U.S.)", "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware",
     "District of Columbia", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky",
@@ -16,7 +22,7 @@
     "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming", "Puerto Rico",
   ];
 
-  // One-click tasks. They drop a prompt into the box; the user can edit before sending.
+  // Starter tasks shown on an empty thread. They drop a prompt into the box.
   const TEMPLATES = [
     { label: "Summarize", hint: "What it is, key terms, anything unfavorable", text: "Summarize the attached document(s). Cover: (1) what it is and who the parties are, (2) the key terms, obligations and dates, (3) anything unusual, missing or unfavorable. Keep it to about one page." },
     { label: "Issue-spot", hint: "Legal issues, rules, risks", text: "Identify the legal issues raised by the attached document(s) and the facts I have given. For each issue give the governing rule with authority, how it likely applies, which facts would change the answer, and a risk level." },
@@ -24,13 +30,8 @@
     { label: "Plain English", hint: "Explain it to a non-lawyer", text: "Explain the attached document(s) in plain English for a non-lawyer: what it does, what each side must do, and what to watch out for." },
     { label: "Key dates", hint: "Deadlines and notice periods", text: "List every date, deadline, notice period and time limit in the attached document(s) in a table: what it is, when it falls or how it is computed, who it applies to, and what happens if it is missed." },
     { label: "Risky clauses", hint: "Unfavorable terms with suggested fixes", text: "Review the attached document(s) for provisions that are unfavorable, unusual or risky (indemnity, limitation of liability, termination, non-compete, assignment, governing law, arbitration, auto-renewal, fees, warranties). Quote each clause, explain the risk, and suggest revised language." },
-    { label: "Compare", hint: "Differences between two drafts", text: "Compare the attached documents. List every substantive difference (added, removed or changed terms) in a table, and say which side each change favors." },
-    { label: "Defined terms", hint: "Every definition, with problems flagged", text: "Extract every defined term in the attached document(s) with its definition, and flag any term that is used inconsistently, circularly, or before it is defined." },
-    { label: "Draft a letter", hint: "Demand, notice or response", text: "Draft a professional letter based on the facts below. State the facts, the legal basis, what is requested, and a deadline for a response. Formal tone. Use [brackets] for details I have not given.\n\nType of letter (demand, notice, response): \nFacts: " },
-    { label: "Check citations", hint: "Confidence in each authority cited", text: "List every case, statute, regulation and rule cited in your previous answer. For each one, say how confident you are that the citation is accurate and that it supports the proposition it was cited for, and flag anything that must be verified before use." },
   ];
 
-  // Two ways to work. Anything else is reachable with /model <name>.
   const MODES = [
     { id: "opus", model: "claude-opus-5-5", label: "Opus (faster, cheaper)", tier: 2 },
     { id: "fable", model: "claude-fable-5-1", label: "Fable (slower, intricate)", tier: 3 },
@@ -66,14 +67,15 @@
   ];
 
   const state = {
-    index: [], loaded: new Map(), activeId: null, settings: {}, prefs: { sidebar: true, activeId: null },
-    models: [], limits: {}, legalPrompt: "", defaultModel: "claude-opus-5-5",
+    index: [], loaded: new Map(), activeId: null, settings: { ...SETTING_DEFAULTS }, prefs: { sidebar: true, activeId: null },
+    models: [], legalPrompt: "", defaultModel: "claude-opus-5-5",
     streaming: null, attachments: [], histIdx: -1, live: { budget: null, today: null, rateLimit: null },
-    saveTimers: new Map(), blobs: new Map(),
+    saveTimers: new Map(), blobs: new Map(), fileIndex: [],
   };
 
   // ------------------------------------------------------------ helpers
   const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+  const hexId = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const fmtCost = (c) => (c == null ? "–" : "$" + c.toFixed(c < 0.01 ? 4 : c < 1 ? 3 : 2));
   const fmtNum = (n) => (n == null ? "–" : Number(n).toLocaleString());
@@ -130,8 +132,6 @@
       /* ignore */
     }
   };
-
-  // Base64 helpers (files travel as base64 strings).
   function bufToB64(buf) {
     const bytes = new Uint8Array(buf);
     let s = "";
@@ -145,8 +145,42 @@
     return bytes;
   }
 
-  async function api(path, { method = "GET", body, signal } = {}) {
-    const headers = { "X-Requested-With": "claude-terminal" };
+  // ------------------------------------------------------------ local database (IndexedDB)
+  const db = (() => {
+    let opening = null;
+    const open = () =>
+      opening ||
+      (opening = new Promise((resolve, reject) => {
+        const req = indexedDB.open("claude-terminal", 1);
+        req.onupgradeneeded = () => {
+          const d = req.result;
+          if (!d.objectStoreNames.contains("threads")) d.createObjectStore("threads", { keyPath: "id" });
+          if (!d.objectStoreNames.contains("files")) d.createObjectStore("files", { keyPath: "id" });
+          if (!d.objectStoreNames.contains("kv")) d.createObjectStore("kv");
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error("could not open local storage"));
+        req.onblocked = () => reject(new Error("local storage is blocked by another tab"));
+      }));
+    const run = async (store, mode, fn) => {
+      const d = await open();
+      return new Promise((resolve, reject) => {
+        const tx = d.transaction(store, mode);
+        const req = fn(tx.objectStore(store));
+        tx.oncomplete = () => resolve(req ? req.result : undefined);
+        tx.onerror = () => reject(tx.error || new Error("local storage error"));
+        tx.onabort = () => reject(tx.error || new Error("local storage error"));
+      });
+    };
+    return {
+      get: (store, key) => run(store, "readonly", (s) => s.get(key)),
+      put: (store, value, key) => run(store, "readwrite", (s) => (key === undefined ? s.put(value) : s.put(value, key))),
+      del: (store, key) => run(store, "readwrite", (s) => s.delete(key)),
+    };
+  })();
+
+  async function api(path, { method = "GET", body, signal, headers: extra } = {}) {
+    const headers = { "X-Requested-With": "claude-terminal", ...(extra || {}) };
     const token = getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -177,24 +211,65 @@
     }, 1000);
   }
   const downloadText = (text, name, mime = "text/plain") => downloadBlob(new Blob([text], { type: mime + ";charset=utf-8" }), name);
-
   const EXT = { python: "py", javascript: "js", typescript: "ts", json: "json", html: "html", css: "css", bash: "sh", sql: "sql", yaml: "yml", markdown: "md", csv: "csv", text: "txt", plaintext: "txt" };
   const extFor = (lang) => EXT[(lang || "").toLowerCase()] || "txt";
 
-  // ------------------------------------------------------------ files (stored as base64 in KV)
+  // ------------------------------------------------------------ files (stored in this browser)
+  const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+  const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const TEXT_EXT = new Set(["txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "html", "htm", "css", "js", "mjs", "ts", "py", "rb", "go", "rs", "java", "c", "h", "cpp", "cs", "php", "sh", "ps1", "sql", "r", "swift", "lua", "tex", "rst", "diff", "patch", "rtf"]);
+  function classifyFile(name, mime) {
+    const ext = (name.includes(".") ? name.split(".").pop() : name).toLowerCase();
+    mime = (mime || "").split(";")[0].trim().toLowerCase();
+    if (IMAGE_TYPES.has(mime)) return { kind: "image", mime };
+    if (mime === "image/jpg" || ext === "jpg" || ext === "jpeg") return { kind: "image", mime: "image/jpeg" };
+    if (ext === "png") return { kind: "image", mime: "image/png" };
+    if (ext === "gif") return { kind: "image", mime: "image/gif" };
+    if (ext === "webp") return { kind: "image", mime: "image/webp" };
+    if (mime === "application/pdf" || ext === "pdf") return { kind: "pdf", mime: "application/pdf" };
+    if (mime === DOCX_MIME || ext === "docx") return { kind: "docx", mime: DOCX_MIME };
+    if (mime === "application/msword" || ext === "doc") return { error: `"${name}" is an old-style .doc file. Open it in Word and save it as .docx first.` };
+    if (mime.startsWith("text/") || TEXT_EXT.has(ext) || ["application/json", "application/xml", "application/javascript", "application/x-yaml", "application/rtf"].includes(mime)) return { kind: "text", mime: mime || "text/plain" };
+    return null;
+  }
+  async function loadFileIndex() {
+    state.fileIndex = (await db.get("kv", "fileIndex").catch(() => null)) || [];
+  }
+  async function saveFileIndex() {
+    await db.put("kv", state.fileIndex, "fileIndex");
+  }
+  async function enforceFileCaps() {
+    const sorted = state.fileIndex.slice().sort((a, b) => a.ts - b.ts);
+    let total = sorted.reduce((s, f) => s + (f.size || 0), 0);
+    const removed = [];
+    while (sorted.length && (sorted.length > LIMITS.files || total > LIMITS.filesMb * 1048576)) {
+      const f = sorted.shift();
+      total -= f.size || 0;
+      removed.push(f);
+    }
+    if (!removed.length) return 0;
+    const gone = new Set(removed.map((f) => f.id));
+    state.fileIndex = state.fileIndex.filter((f) => !gone.has(f.id));
+    await saveFileIndex();
+    for (const f of removed) {
+      await db.del("files", f.id).catch(() => {});
+      state.blobs.delete(f.id);
+    }
+    return removed.length;
+  }
   async function fetchFile(f) {
     if (state.blobs.has(f.id)) return state.blobs.get(f.id);
-    const data = await apiJson(`/api/files/${f.id}`);
-    const bytes = b64ToBytes(data.b64);
-    const entry = { bytes, text: data.text, blob: new Blob([bytes], { type: f.mime || "application/octet-stream" }), url: null };
+    const rec = await db.get("files", f.id);
+    if (!rec) throw new Error("this file is no longer in this browser");
+    const bytes = b64ToBytes(rec.b64);
+    const entry = { bytes, text: rec.text, blob: new Blob([bytes], { type: f.mime || "application/octet-stream" }), url: null };
     entry.url = URL.createObjectURL(entry.blob);
     state.blobs.set(f.id, entry);
     return entry;
   }
   async function downloadFile(f) {
     try {
-      const { blob } = await fetchFile(f);
-      downloadBlob(blob, f.name);
+      downloadBlob((await fetchFile(f)).blob, f.name);
     } catch (e) {
       note(`Download failed: ${e.message}`);
     }
@@ -202,29 +277,67 @@
   async function uploadFiles(files, { attach = true, source } = {}) {
     const added = [];
     for (const file of files) {
+      const name = String(file.name || "pasted").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 120) || "file";
       try {
+        const cls = classifyFile(name, file.type || "");
+        if (!cls) throw new Error("unsupported type; use images, PDF, Word (.docx) or text files");
+        if (cls.error) throw new Error(cls.error);
+        if (file.size > CAPS[cls.kind]) throw new Error(`too large (${fmtBytes(file.size)}; the limit is ${fmtBytes(CAPS[cls.kind])} for ${cls.kind} files)`);
         const buf = await file.arrayBuffer();
-        const body = { name: file.name || "pasted", type: file.type || "", source, b64: bufToB64(buf) };
-        if (/\.docx$/i.test(file.name || "")) {
+        let text = null;
+        if (cls.kind === "docx") {
           if (!window.mammoth) throw new Error("the Word reader has not loaded yet; try again in a moment");
-          body.text = (await mammoth.extractRawText({ arrayBuffer: buf })).value;
+          text = (await mammoth.extractRawText({ arrayBuffer: buf })).value;
+        } else if (cls.kind === "text") {
+          try {
+            text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+          } catch {
+            throw new Error("not readable text");
+          }
         }
-        const entry = await apiJson("/api/upload", { method: "POST", body });
+        const entry = { id: hexId(), name, kind: cls.kind, mime: cls.mime, size: file.size, ts: Date.now(), source: source === "assistant" ? "assistant" : "upload" };
+        await db.put("files", { ...entry, b64: bufToB64(buf), text });
+        state.fileIndex.push(entry);
+        await saveFileIndex();
+        const evicted = await enforceFileCaps();
         added.push(entry);
         if (attach) state.attachments.push(entry);
-        if (entry.evicted) note(`Storage is full: the ${entry.evicted} oldest file(s) were removed to make room (first in, first out).`);
+        if (evicted) note(`File storage is full: the ${evicted} oldest file(s) were removed to make room (first in, first out).`);
       } catch (e) {
-        note(`Upload failed for ${file.name || "file"}: ${e.message}`);
+        note(`Could not add ${name}: ${e.message}`);
       }
     }
     renderAttachments();
     return added;
   }
 
-  // ------------------------------------------------------------ threads
+  // ------------------------------------------------------------ settings (stored in this browser)
+  async function loadSettings() {
+    state.settings = { ...SETTING_DEFAULTS, ...((await db.get("kv", "settings").catch(() => null)) || {}) };
+  }
+  async function saveSettings(patch) {
+    const s = { ...state.settings, ...patch };
+    if (s.effort && !Object.prototype.hasOwnProperty.call(EFFORT_RANK, s.effort)) s.effort = null;
+    s.maxTokens = Math.max(256, Math.min(128000, Math.floor(Number(s.maxTokens)) || 32000));
+    state.settings = s;
+    applyTheme();
+    try {
+      await db.put("kv", s, "settings");
+    } catch (e) {
+      note(`Could not save settings in this browser: ${e.message}`);
+    }
+  }
+
+  // ------------------------------------------------------------ threads (stored in this browser)
   const active = () => (state.activeId && state.loaded.get(state.activeId)) || null;
   const modelInfo = (id) => state.models.find((m) => m.id === id || (id && id.startsWith(m.id + "-"))) || null;
   const summaryOf = (t) => ({ id: t.id, title: t.title, createdAt: t.createdAt, updatedAt: t.updatedAt, cost: t.cost || 0, count: t.messages.filter((m) => m.role !== "note").length, jurisdiction: t.jurisdiction, model: t.model });
+
+  async function refreshIndex() {
+    state.index = (await db.get("kv", "threadIndex").catch(() => null)) || [];
+    for (const t of state.loaded.values()) if (t.unsaved && !state.index.find((s) => s.id === t.id)) state.index.unshift(summaryOf(t));
+  }
+  const persistIndex = () => db.put("kv", state.index.filter((s) => !(state.loaded.get(s.id) || {}).unsaved), "threadIndex");
 
   function newThread() {
     const cur = active();
@@ -266,30 +379,43 @@
     const run = async () => {
       state.saveTimers.delete(t.id);
       try {
-        const { unsaved, ...body } = t;
-        const r = await apiJson(`/api/threads/${t.id}`, { method: "PUT", body });
+        const { unsaved, ...record } = t;
+        await db.put("threads", record);
         delete t.unsaved;
-        if (r.evicted) {
-          note(`Thread storage is full: the ${r.evicted} oldest thread(s) were removed to make room (first in, first out).`);
-          refreshIndex().then(renderSidebar).catch(() => {});
+        // First in, first out past the cap.
+        const ordered = state.index.slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        let evicted = 0;
+        while (ordered.length > LIMITS.threads) {
+          const old = ordered.shift();
+          if (old.id === t.id) continue;
+          state.index = state.index.filter((s) => s.id !== old.id);
+          state.loaded.delete(old.id);
+          await db.del("threads", old.id).catch(() => {});
+          evicted += 1;
+        }
+        await persistIndex();
+        if (evicted) {
+          note(`Thread storage is full: the ${evicted} oldest thread(s) were removed to make room (first in, first out).`);
+          renderSidebar();
         }
       } catch (e) {
-        if (e.message !== "Signed out") note(`Could not save this thread: ${e.message}`);
+        note(`Could not save this thread in this browser: ${e.message}`);
       }
     };
-    if (immediate) run();
-    else state.saveTimers.set(t.id, setTimeout(run, 600));
+    if (immediate) return run();
+    state.saveTimers.set(t.id, setTimeout(run, 600));
   }
   async function openThread(id) {
     if (!state.loaded.has(id)) {
-      try {
-        const t = await apiJson(`/api/threads/${id}`);
-        t.tokens = t.tokens || { in: 0, out: 0 };
-        state.loaded.set(id, t);
-      } catch (e) {
-        note(`Could not open that thread: ${e.message}`);
-        return;
+      const t = await db.get("threads", id).catch(() => null);
+      if (!t) {
+        note("That thread is no longer in this browser.");
+        state.index = state.index.filter((s) => s.id !== id);
+        await persistIndex();
+        return renderSidebar();
       }
+      t.tokens = t.tokens || { in: 0, out: 0 };
+      state.loaded.set(id, t);
     }
     setActive(id);
     state.attachments = [];
@@ -300,16 +426,10 @@
     const s = state.index.find((x) => x.id === id);
     if (s && s.count && !confirm(`Delete "${s.title}"?`)) return;
     if (state.streaming && state.streaming.threadId === id) state.streaming.ctrl.abort();
-    const t = state.loaded.get(id);
-    if (!(t && t.unsaved)) {
-      try {
-        await apiJson(`/api/threads/${id}`, { method: "DELETE" });
-      } catch (e) {
-        if (!/No such/.test(e.message)) return note(`Could not delete: ${e.message}`);
-      }
-    }
+    await db.del("threads", id).catch(() => {});
     state.loaded.delete(id);
     state.index = state.index.filter((x) => x.id !== id);
+    await persistIndex();
     if (state.activeId === id) {
       state.activeId = null;
       if (state.index[0]) await openThread(state.index[0].id);
@@ -317,14 +437,9 @@
     }
     renderAll();
   }
-  async function refreshIndex() {
-    const r = await apiJson("/api/threads");
-    state.index = r.threads;
-    state.limits.threads = r.limit;
-    for (const t of state.loaded.values()) if (t.unsaved && !state.index.find((s) => s.id === t.id)) state.index.unshift(summaryOf(t));
-  }
 
-  function toApiMessages(msgs) {
+  // Build the Messages API content for the thread, attachments inline.
+  async function toApiMessages(msgs) {
     const out = [];
     for (const m of msgs) {
       if (m.role === "note") continue;
@@ -332,7 +447,17 @@
         if (m.text && m.text.trim()) out.push({ role: "assistant", content: m.text });
         continue;
       }
-      const blocks = (m.files || []).map((f) => ({ type: "file", id: f.id, name: f.name }));
+      const blocks = [];
+      for (const f of m.files || []) {
+        const rec = await db.get("files", f.id).catch(() => null);
+        if (!rec) {
+          blocks.push({ type: "text", text: `[The attached file "${f.name}" is no longer stored in this browser.]` });
+          continue;
+        }
+        if (rec.kind === "image") blocks.push({ type: "image", source: { type: "base64", media_type: rec.mime, data: rec.b64 } });
+        else if (rec.kind === "pdf") blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: rec.b64 }, title: rec.name });
+        else blocks.push({ type: "document", source: { type: "text", media_type: "text/plain", data: rec.text != null ? rec.text : new TextDecoder().decode(b64ToBytes(rec.b64)) }, title: rec.name });
+      }
       if (m.text) blocks.push({ type: "text", text: m.text });
       if (!blocks.length) continue;
       out.push({ role: "user", content: blocks.length === 1 && blocks[0].type === "text" ? m.text : blocks });
@@ -345,6 +470,25 @@
     if (t.jurisdiction) extras.push(`Default jurisdiction: ${t.jurisdiction}.`);
     extras.push(`Today's date: ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}.`);
     return base ? `${base}\n\n${extras.join(" ")}` : extras.join(" ");
+  }
+  // The request body the Worker relays to the Messages API.
+  function buildRequest(t, messages) {
+    const model = t.model || state.settings.model || state.defaultModel;
+    const info = modelInfo(model);
+    const effort = info && info.efforts.includes(state.settings.effort) ? state.settings.effort : null;
+    const showThinking = state.settings.showThinking !== false;
+    const params = { model, max_tokens: Math.max(256, Math.min(128000, Number(state.settings.maxTokens) || 32000)), messages };
+    const system = composeSystem(t);
+    if (system) params.system = system;
+    if (effort) params.output_config = { effort };
+    const mode = info ? info.thinking : "unknown";
+    if (mode === "always") {
+      if (showThinking) params.thinking = { type: "adaptive", display: "summarized" };
+    } else if (mode === "adaptive") params.thinking = showThinking ? { type: "adaptive", display: "summarized" } : { type: "adaptive" };
+    else if (mode === "budget" && showThinking) params.thinking = { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, params.max_tokens - 1)) };
+    const fallbacks = state.settings.fallbacks !== false && !!(info && info.fallbacks);
+    if (fallbacks) params.fallbacks = "default";
+    return { params, betas: fallbacks ? ["server-side-fallback-2026-07-01"] : [] };
   }
   function note(text) {
     const t = ensureThread();
@@ -444,7 +588,6 @@
     $("#highlight").checked = state.settings.highlight !== false;
     document.body.classList.toggle("no-highlight", state.settings.highlight === false);
     renderEffortOptions();
-    renderStats();
     renderUsageChip();
   }
   function renderEffortOptions() {
@@ -461,13 +604,6 @@
     h.textContent = hint.text;
     h.className = `speed ${hint.cls}`;
   }
-  function renderStats() {
-    const t = active();
-    const s = $("#thread-stats");
-    if (!s) return;
-    if (!t || !t.messages.length) return (s.textContent = "");
-    s.textContent = `${fmtNum(t.tokens.in)} in · ${fmtNum(t.tokens.out)} out · ${fmtCost(t.cost)} this thread`;
-  }
   function renderUsageChip() {
     const chip = $("#usage-chip");
     const b = state.live.budget;
@@ -480,20 +616,10 @@
         const pct = b.monthly > 0 ? b.spent / b.monthly : 1;
         parts.push(`<span class="${pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok"}">${fmtCost(Math.max(0, b.remaining))} left</span>`);
       }
-      if (!exact) parts.push(`<span title="Estimated from token counts. Add an ANTHROPIC_ADMIN_KEY secret for Anthropic's exact figures.">est.</span>`);
+      if (!exact) parts.push(`<span title="Estimated from token counts.">est.</span>`);
     }
-    chip.title = exact ? "Figures from Anthropic's cost report" : "Estimated from token counts; add an ANTHROPIC_ADMIN_KEY secret for exact figures";
+    chip.title = exact ? "Figures from Anthropic" : "Estimated from token counts";
     chip.innerHTML = parts.length ? parts.join(" · ") : "usage";
-  }
-  function renderTemplates() {
-    const box = $("#templates");
-    if (!box) return;
-    box.innerHTML = "";
-    for (const tpl of TEMPLATES) {
-      const b = btn(tpl.label, () => useTemplate(tpl));
-      b.title = tpl.hint;
-      box.appendChild(b);
-    }
   }
   function useTemplate(tpl) {
     const input = $("#input");
@@ -512,7 +638,7 @@
       empty.appendChild(el("h2", "", "What are you working on?"));
       empty.appendChild(el("p", "", `Ask a question, or attach a contract, filing, letter or statute (PDF, Word, image or text) and pick a task. Answers follow ${esc(t && t.jurisdiction ? t.jurisdiction : "your default jurisdiction")} unless you say otherwise.`));
       const grid = el("div", "starters");
-      for (const tpl of TEMPLATES.slice(0, 6)) {
+      for (const tpl of TEMPLATES) {
         const b = btn("", () => useTemplate(tpl), "starter");
         b.innerHTML = `<b>${esc(tpl.label)}</b><span>${esc(tpl.hint)}</span>`;
         grid.appendChild(b);
@@ -528,7 +654,6 @@
     const b = $("#transcript");
     return b.scrollHeight - b.scrollTop - b.clientHeight < 60;
   }
-
   const KIND_ICON = { pdf: "⎘", docx: "▤", text: "≡" };
   function fileChip(f, { removable, onRemove } = {}) {
     const a = el("span", "file-chip");
@@ -559,7 +684,6 @@
     }
     return a;
   }
-
   function renderMessage(m, t) {
     const root = el("div", `msg ${m.role}`);
     root.dataset.mid = m.id;
@@ -743,21 +867,14 @@
     renderAll();
     await streamInto(t, am);
   }
-
   async function streamInto(t, am) {
     const ctrl = new AbortController();
     const s = { ctrl, threadId: t.id, msg: am, usage: null, started: Date.now() };
     state.streaming = s;
     document.body.classList.add("streaming");
-    const info = modelInfo(t.model);
-    const body = {
-      conv: t.id, model: t.model || state.settings.model || state.defaultModel, system: composeSystem(t),
-      messages: toApiMessages(t.messages.filter((m) => m !== am)),
-      effort: info && info.efforts.includes(state.settings.effort) ? state.settings.effort : null,
-      maxTokens: state.settings.maxTokens || 32000, showThinking: state.settings.showThinking !== false, fallbacks: state.settings.fallbacks !== false,
-    };
     try {
-      const res = await api("/api/chat", { method: "POST", body, signal: ctrl.signal });
+      const { params, betas } = buildRequest(t, await toApiMessages(t.messages.filter((m) => m !== am)));
+      const res = await api("/api/chat", { method: "POST", body: { ...params, stream: true }, signal: ctrl.signal, headers: betas.length ? { "X-Anthropic-Beta": betas.join(",") } : {} });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
       try {
         const rl = JSON.parse(res.headers.get("X-Anthropic-RateLimit") || "null");
@@ -779,13 +896,13 @@
         t.tokens.in += (s.usage.input_tokens || 0) + (s.usage.cache_read_input_tokens || 0) + (s.usage.cache_creation_input_tokens || 0);
         t.tokens.out += s.usage.output_tokens || 0;
         try {
-          const r = await apiJson("/api/usage", { method: "POST", body: { model: am.meta.model || t.model, conv: t.id, usage: s.usage, ms: am.meta.ms, stop: am.meta.stop_reason } });
+          const r = await apiJson("/api/usage", { method: "POST", body: { model: am.meta.model || t.model, usage: s.usage, ms: am.meta.ms, stop: am.meta.stop_reason } });
           am.meta.cost = r.cost;
           if (r.cost) t.cost = (t.cost || 0) + r.cost;
           state.live.budget = r.budget || state.live.budget;
           state.live.today = r.today;
         } catch {
-          /* usage report is best-effort */
+          /* best effort */
         }
       }
       saveThread(t, true);
@@ -796,13 +913,10 @@
         if (wasBottom) $("#transcript").scrollTop = $("#transcript").scrollHeight;
       }
       renderSidebar();
-      renderStats();
       renderUsageChip();
       $("#input").focus();
     }
   }
-
-  // Reads the Messages API stream as the Worker passes it through, untouched.
   async function readSSE(res, onEvent) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -1056,11 +1170,11 @@
   /print                print this thread
   /files · /usage       open the Files or Usage panel
   /context              count the tokens Claude will read on the next message
-  /budget <usd|off>     monthly budget for the "left" readout
   /clear · /delete      clear messages · delete this thread
   /logout               sign this browser out
 Keys: Enter sends · Shift+Enter new line · Esc stops · ↑/↓ recall earlier messages.
-Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file to preview it.`;
+Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file to preview it.
+Everything you write and attach stays in this browser only.`;
 
   async function runCommand(line) {
     const [cmd] = line.slice(1).trim().split(/\s+/);
@@ -1110,7 +1224,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         if (!arg) return note(`Effort: ${state.settings.effort || "default"}`);
         const v = arg.toLowerCase();
         if (/^(default|off)$/.test(v)) await saveSettings({ effort: null });
-        else if (["low", "medium", "high", "xhigh", "max"].includes(v)) await saveSettings({ effort: v });
+        else if (Object.prototype.hasOwnProperty.call(EFFORT_RANK, v)) await saveSettings({ effort: v });
         else return note("Effort must be low, medium, high, xhigh, max or default.");
         renderEffortOptions();
         return note(`Effort → ${state.settings.effort || "default"}`);
@@ -1147,15 +1261,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       case "files": return openFiles();
       case "usage": return openUsage();
       case "context": return countContext();
-      case "budget": {
-        if (!arg) return openUsage();
-        const off = /^(off|none|clear|0)$/i.test(arg);
-        const n = off ? null : Number(arg.replace(/[$,]/g, ""));
-        if (!off && !(n >= 0)) return note("Usage: /budget 25   or   /budget off");
-        await saveSettings({ monthlyBudget: n });
-        await refreshUsage();
-        return note(off ? "Monthly budget cleared." : `Monthly budget → $${n}`);
-      }
       case "logout": return logout();
       default: return note(`Unknown command /${cmd}. Try /help.`);
     }
@@ -1173,9 +1278,10 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     const t = active();
     if (!t || !t.messages.some((m) => m.role === "user")) return note("Nothing in this thread yet.");
     try {
-      const msgs = toApiMessages(t.messages);
+      const msgs = await toApiMessages(t.messages);
       if (msgs[msgs.length - 1].role !== "user") msgs.push({ role: "user", content: "." });
-      const r = await apiJson("/api/count", { method: "POST", body: { model: t.model, system: composeSystem(t), messages: msgs } });
+      const { params } = buildRequest(t, msgs);
+      const r = await apiJson("/api/count", { method: "POST", body: { model: params.model, system: params.system, messages: params.messages } });
       const info = modelInfo(t.model);
       const est = info && info.in != null ? ` ≈ ${fmtCost((r.input_tokens * info.in) / 1e6)} of input per message` : "";
       note(`Context: ${fmtNum(r.input_tokens)} tokens${est}`);
@@ -1184,15 +1290,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     }
   }
 
-  // ------------------------------------------------------------ settings
-  async function saveSettings(patch) {
-    try {
-      state.settings = await apiJson("/api/settings", { method: "PUT", body: patch });
-      applyTheme();
-    } catch (e) {
-      if (e.message !== "Signed out") note(`Could not save settings: ${e.message}`);
-    }
-  }
+  // ------------------------------------------------------------ settings panel
   function applyTheme() {
     document.documentElement.dataset.theme = "light";
     document.body.classList.toggle("no-highlight", state.settings.highlight === false);
@@ -1207,8 +1305,7 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     $("#set-highlight").checked = s.highlight !== false;
     $("#set-thinking").checked = s.showThinking !== false;
     $("#set-fallback").checked = s.fallbacks !== false;
-    const L = state.limits;
-    $("#set-limits").textContent = L.threads ? `Keeps the newest ${L.threads} threads and ${L.files} files (up to ${L.filesMb} MB); older ones are removed first in, first out.` : "";
+    $("#set-limits").textContent = `Threads, files and these settings are saved only in this browser (newest ${LIMITS.threads} threads and ${LIMITS.files} files kept). Clearing the browser's site data removes them.`;
     $("#settings-panel").classList.remove("hidden");
   }
   async function submitSettings() {
@@ -1223,7 +1320,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
       fallbacks: $("#set-fallback").checked,
     });
     $("#settings-panel").classList.add("hidden");
-    refreshUsage().catch(() => {});
     renderAll();
     note("Settings saved.");
   }
@@ -1260,15 +1356,13 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         const pct = b.monthly > 0 ? Math.min(1, month / b.monthly) : 1;
         const cls = pct >= 1 ? "bad" : pct >= 0.8 ? "warn" : "ok";
         cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v"><span class="${cls}">${fmtCost(Math.max(0, b.monthly - month))}</span></div><div class="s">of ${fmtCost(b.monthly)} · ${Math.round(pct * 100)}% used</div>`));
-      } else {
-        cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v">—</div><div class="s">no monthly limit configured</div>`));
-      }
+      } else cards.appendChild(el("div", "card", `<div class="k">Remaining this month</div><div class="v">—</div><div class="s">no monthly limit configured</div>`));
       body.appendChild(cards);
-      let note;
-      if (exact) note = `Figures from Anthropic, up to the minute (checked ${fmtAgo(exact.at)}).`;
-      else if (u.official && u.official.error) note = `Anthropic's figures could not be read (${esc(u.official.error)}); these are this terminal's estimates.`;
-      else note = "Estimates from this terminal's token counts. Add an ANTHROPIC_ADMIN_KEY secret for Anthropic's exact figures.";
-      body.appendChild(el("div", "fine", note));
+      let text;
+      if (exact) text = `Figures from Anthropic, up to the minute (checked ${fmtAgo(exact.at)}).`;
+      else if (u.official && u.official.error) text = `Anthropic's figures could not be read (${esc(u.official.error)}); these are estimates.`;
+      else text = "Estimates from token counts. Add an ANTHROPIC_ADMIN_KEY secret for Anthropic's exact figures.";
+      body.appendChild(el("div", "fine", text));
     } catch (e) {
       body.textContent = "Could not load usage: " + e.message;
     }
@@ -1279,41 +1373,38 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     const panel = $("#files-panel");
     panel.classList.remove("hidden");
     const body = $("#files-body");
-    body.textContent = "Loading…";
-    try {
-      const r = await apiJson("/api/files");
-      const files = r.files || [];
-      $("#files-cap").textContent = `${files.length} of ${r.limit} · ${fmtBytes(r.usedBytes || 0)} of ${r.limitMb} MB`;
-      body.innerHTML = "";
-      if (!files.length) body.appendChild(el("div", "fine", "No files yet. Upload one, drop one into a thread, or use “Save to files” on an answer."));
-      for (const f of files) {
-        const row = el("div", "file-row");
-        if (f.kind === "image") {
-          const img = el("img");
-          img.alt = "";
-          fetchFile(f).then((e) => (img.src = e.url)).catch(() => {});
-          row.appendChild(img);
-        } else row.appendChild(el("span", "kind", f.kind));
-        row.appendChild(el("span", "fname", esc(f.name)));
-        row.appendChild(el("span", "fmeta", `${fmtBytes(f.size)} · ${new Date(f.ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}${f.source === "assistant" ? " · from Claude" : ""}`));
-        row.appendChild(btn("Preview", () => openPreview(f), "small"));
-        row.appendChild(btn("Attach", () => {
-          if (!state.attachments.find((x) => x.id === f.id)) state.attachments.push(f);
-          renderAttachments();
-          panel.classList.add("hidden");
-          $("#input").focus();
-        }, "small"));
-        row.appendChild(btn("Download", () => downloadFile(f), "small"));
-        row.appendChild(btn("Delete", async () => {
-          if (!confirm(`Delete ${f.name}?`)) return;
-          await apiJson(`/api/files/${f.id}`, { method: "DELETE" });
-          state.blobs.delete(f.id);
-          openFiles();
-        }, "small danger"));
-        body.appendChild(row);
-      }
-    } catch (e) {
-      body.textContent = "Could not load files: " + e.message;
+    body.innerHTML = "";
+    const files = state.fileIndex.slice().sort((a, b) => b.ts - a.ts);
+    const used = files.reduce((s, f) => s + (f.size || 0), 0);
+    $("#files-cap").textContent = `${files.length} of ${LIMITS.files} · ${fmtBytes(used)} of ${LIMITS.filesMb} MB · this browser only`;
+    if (!files.length) body.appendChild(el("div", "fine", "No files yet. Upload one, drop one into a thread, or use “Save to files” on an answer."));
+    for (const f of files) {
+      const row = el("div", "file-row");
+      if (f.kind === "image") {
+        const img = el("img");
+        img.alt = "";
+        fetchFile(f).then((e) => (img.src = e.url)).catch(() => {});
+        row.appendChild(img);
+      } else row.appendChild(el("span", "kind", f.kind));
+      row.appendChild(el("span", "fname", esc(f.name)));
+      row.appendChild(el("span", "fmeta", `${fmtBytes(f.size)} · ${new Date(f.ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}${f.source === "assistant" ? " · from Claude" : ""}`));
+      row.appendChild(btn("Preview", () => openPreview(f), "small"));
+      row.appendChild(btn("Attach", () => {
+        if (!state.attachments.find((x) => x.id === f.id)) state.attachments.push(f);
+        renderAttachments();
+        panel.classList.add("hidden");
+        $("#input").focus();
+      }, "small"));
+      row.appendChild(btn("Download", () => downloadFile(f), "small"));
+      row.appendChild(btn("Delete", async () => {
+        if (!confirm(`Delete ${f.name}?`)) return;
+        await db.del("files", f.id).catch(() => {});
+        state.fileIndex = state.fileIndex.filter((x) => x.id !== f.id);
+        state.blobs.delete(f.id);
+        await saveFileIndex();
+        openFiles();
+      }, "small danger"));
+      body.appendChild(row);
     }
   }
   async function openPreview(f) {
@@ -1371,22 +1462,20 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
     try {
       if (!me) me = await (await api("/api/me")).json();
       state.legalPrompt = me.legalPrompt || "";
-      state.limits = me.limits || {};
       state.defaultModel = me.defaultModel || state.defaultModel;
       if (me.hasApiKey === false) note("The Worker has no ANTHROPIC_API_KEY secret yet, so replies will fail until it is added.");
-      const [models, settings] = await Promise.all([apiJson("/api/models").catch(() => []), apiJson("/api/settings").catch(() => ({}))]);
-      state.models = Array.isArray(models) ? models : [];
-      state.settings = settings;
+      await loadSettings();
       applyTheme();
-      await refreshIndex();
+      await Promise.all([loadFileIndex(), refreshIndex()]);
+      state.models = await apiJson("/api/models").catch(() => []);
+      if (!Array.isArray(state.models)) state.models = [];
     } catch (e) {
       if (e.message === "Signed out") return;
       note(`Could not load everything: ${e.message}`);
     }
-    renderTemplates();
     const want = state.prefs.activeId && state.index.find((s) => s.id === state.prefs.activeId) ? state.prefs.activeId : state.index[0] && state.index[0].id;
     if (want) await openThread(want);
-    else newThread();
+    if (!active()) newThread();
     renderAll();
     refreshUsage().catch(() => {});
     $("#input").focus();
@@ -1439,7 +1528,6 @@ Files: drop, paste or attach PDFs, Word (.docx), images and text. Click a file t
         b.disabled = false;
       }
     });
-
     const input = $("#input");
     $("#composer").addEventListener("submit", (e) => {
       e.preventDefault();
